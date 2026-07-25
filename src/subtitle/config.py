@@ -52,23 +52,40 @@ class UiConfig:
     font_family: str = "Microsoft YaHei"
     font_size: int = 22
     window_opacity: float = 0.88
-    max_chars: int = 20000  # 字幕文本按字符数上限，超出从头清理（与窗口大小无关）
-    theme: str = "dark"          # dark=半透明黑底白字 / light=半透明白底黑字
-    always_on_top: bool = True   # 打开时默认置顶
-    # 窗口位置/尺寸记忆（None = 用默认值）
+    max_chars: int = 20000
+    theme: str = "Dark"            # 主题名称（对应 ThemeManager 中的 key）
+    always_on_top: bool = True
+    # 窗口位置/尺寸记忆
     win_x: Optional[int] = None
     win_y: Optional[int] = None
     win_w: int = 720
     win_h: int = 140
-    # 点 ✕ 时的行为：ask=每次询问 / hide=直接隐藏到托盘 / quit=直接退出
+    # 行为
     close_action: str = "ask"
-    # 工具栏无操作后自动隐藏的延时（毫秒）
     toolbar_hide_delay_ms: int = 800
-    # 锁定滚动到底部：开启后新字幕进来强制跟随，无视用户滚动位置
     lock_scroll_to_bottom: bool = False
-    # 窗口最小尺寸（放大下限，避免缩太小没法用）
     min_win_w: int = 480
     min_win_h: int = 120
+    # 自定义几何（覆盖主题默认值）
+    border_radius: Optional[int] = None
+    padding_top: Optional[int] = None
+    padding_bottom: Optional[int] = None
+    padding_left: Optional[int] = None
+    padding_right: Optional[int] = None
+    line_spacing: Optional[float] = None
+
+
+@dataclass
+class SkinConfig:
+    """桌宠/贴图皮肤配置。"""
+    enabled: bool = False                    # 是否启用贴图皮肤
+    active_skin: str = ""                    # 当前使用的皮肤名称
+    skins_dir: str = "skins"                 # 皮肤存储目录（相对项目根）
+    editor_grid_snap: bool = True            # 编辑器网格吸附
+    editor_grid_size: int = 8                # 网格大小 (px)
+    editor_show_guides: bool = True          # 显示辅助线
+    animation_fps: int = 30                  # 动画帧率
+    animation_loop: bool = True              # 动画循环播放
 
 
 @dataclass
@@ -76,13 +93,19 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     asr: AsrConfig = field(default_factory=AsrConfig)
     ui: UiConfig = field(default_factory=UiConfig)
+    skin: SkinConfig = field(default_factory=SkinConfig)
 
 
 def _build(d: dict[str, Any]) -> Config:
     return Config(
-        audio=AudioConfig(**d.get("audio", {})),
-        asr=AsrConfig(**d.get("asr", {})),
-        ui=UiConfig(**d.get("ui", {})),
+        audio=AudioConfig(**{k: v for k, v in d.get("audio", {}).items()
+                             if k in AudioConfig.__dataclass_fields__}),
+        asr=AsrConfig(**{k: v for k, v in d.get("asr", {}).items()
+                         if k in AsrConfig.__dataclass_fields__}),
+        ui=UiConfig(**{k: v for k, v in d.get("ui", {}).items()
+                       if k in UiConfig.__dataclass_fields__}),
+        skin=SkinConfig(**{k: v for k, v in d.get("skin", {}).items()
+                           if k in SkinConfig.__dataclass_fields__}),
     )
 
 
