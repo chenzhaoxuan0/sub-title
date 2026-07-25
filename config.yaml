@@ -15,15 +15,15 @@ asr:
   punc_model: ct-punc
 ui:
   font_family: MiSans VF Medium
-  font_size: 28
+  font_size: 38
   window_opacity: 0.87
   max_chars: 20000
-  theme: dark
+  theme: light
   always_on_top: true
-  win_x: 641
-  win_y: 1409
-  win_w: 1014
-  win_h: 231
+  win_x: 2456
+  win_y: 1880
+  win_w: 1344
+  win_h: 246
   close_action: ask
   toolbar_hide_delay_ms: 800
   lock_scroll_to_bottom: true

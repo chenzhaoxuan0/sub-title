@@ -115,10 +115,12 @@ class SubtitlePanel(QWidget):
         # 根窗口：透明，不画任何东西
         self.setObjectName("root")
 
-        # 内层 container：真正承载背景色 + 圆角
+        # 字幕区 container：固定高度 = 窗口内容高度，位置永不变。
+        # 工具栏是根窗口的另一个子 widget，显隐时改变窗口总高 + container 位置，
+        # 但 container 自身的几何（屏幕上的位置和大小）始终不变 → 字幕不跳。
         self.container = QWidget(self)
         self.container.setObjectName("container")
-        self.container.setAttribute(Qt.WA_StyledBackground, True)  # 让 QSS 背景生效
+        self.container.setAttribute(Qt.WA_StyledBackground, True)
         container_layout = QVBoxLayout(self.container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
@@ -127,9 +129,10 @@ class SubtitlePanel(QWidget):
         self.view.setFont(QFont(self.ui_cfg.font_family, self._font_size))
         self.view.setPlaceholderText("点击 ▶ 开始，播放任意视频/音频，字幕会实时出现……")
 
-        # ---- 工具栏 ----
-        self.toolbar = QWidget(self.container)
+        # ---- 工具栏：根窗口的子，绝对定位在 container 上方 ----
+        self.toolbar = QWidget(self)
         self.toolbar.setObjectName("toolbar")
+        self.toolbar.setAttribute(Qt.WA_StyledBackground, True)
         tb = QHBoxLayout(self.toolbar)
         tb.setContentsMargins(10, 6, 10, 4)
         tb.setSpacing(6)
@@ -227,10 +230,8 @@ class SubtitlePanel(QWidget):
         self.grip.setObjectName("grip")
         self.grip.setFixedSize(16, 16)
 
-        # 组装 container
-        container_layout.addWidget(self.toolbar)
+        # 组装 container：只有字幕区 + 底部状态栏/grip（工具栏不在这里）
         container_layout.addWidget(self.view, 1)
-        # 状态栏 + grip 同一行
         bottom = QHBoxLayout()
         bottom.setContentsMargins(10, 0, 10, 4)
         bottom.addWidget(self.status_label)
@@ -238,10 +239,8 @@ class SubtitlePanel(QWidget):
         bottom.addWidget(self.grip, 0, Qt.AlignRight | Qt.AlignBottom)
         container_layout.addLayout(bottom)
 
-        # 根窗口布局：container 占满
-        root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.addWidget(self.container)
+        # 根窗口无布局：container 和 toolbar 都用绝对定位（见 _layout_window）
+        # 这样工具栏显隐能改变窗口总高，但 container 几何不变
 
         # 初始隐藏覆盖层
         self.toolbar.setVisible(False)
@@ -249,15 +248,18 @@ class SubtitlePanel(QWidget):
         self.grip.setVisible(False)
 
     def _restore_geometry(self):
-        # 最小尺寸（放大下限，避免缩太小）
+        # 最小尺寸（放大下限，避免缩太小）——针对字幕区高度
         self.setMinimumSize(
             getattr(self.ui_cfg, "min_win_w", 480),
             getattr(self.ui_cfg, "min_win_h", 120),
         )
-        self.resize(self.ui_cfg.win_w or 760, self.ui_cfg.win_h or 150)
+        # 字幕区高度（用户配置的 win_h 是字幕区高度，不是含工具栏的窗口总高）
+        self._content_h = self.ui_cfg.win_h or 150
+        self.resize(self.ui_cfg.win_w or 760, self._content_h)
         if self.ui_cfg.win_x is not None and self.ui_cfg.win_y is not None:
             self.move(self.ui_cfg.win_x, self.ui_cfg.win_y)
-        # 初始化时按当前宽度决定工具栏是否精简
+        # 初始布局 + 按宽度决定工具栏精简
+        self._layout_window()
         self._update_toolbar_compact()
 
     # ---------- 主题 ----------
@@ -267,23 +269,37 @@ class SubtitlePanel(QWidget):
         r, g, b = self._hex_to_rgb(th["bg"])
         text = th["text"]
         bg_rgba = f"rgba({r}, {g}, {b}, {opacity})"
-
+        # 工具栏：中性灰底（不透明），与字幕区清晰分离。
+        # 按钮：高对比度——dark 用亮底深字，light 用深底浅字，保证可读。
         if self._current_theme == "dark":
-            btn_bg, btn_text, btn_border = "rgba(255,255,255,50)", "#f0f0f0", "rgba(255,255,255,70)"
-            btn_hover = "rgba(255,255,255,90)"
+            toolbar_bg = "#2d2d2d"          # 中性深灰
+            btn_bg = "#d8d8d8"               # 亮按钮底
+            btn_text = "#1a1a1a"             # 深字（高对比）
+            btn_border = "#b0b0b0"
+            btn_hover = "#ffffff"
+            btn_disabled_bg = "#555555"
+            btn_disabled_text = "#999999"
             combo_view_bg, combo_sel = "#2a2a2a", "#3a6ea5"
+            combo_text = "#f0f0f0"
         else:
-            btn_bg, btn_text, btn_border = "rgba(0,0,0,40)", "#1a1a1a", "rgba(0,0,0,60)"
-            btn_hover = "rgba(0,0,0,70)"
+            toolbar_bg = "#e0e0e0"          # 中性浅灰
+            btn_bg = "#3a3a3a"              # 深按钮底
+            btn_text = "#ffffff"            # 亮字（高对比）
+            btn_border = "#555555"
+            btn_hover = "#1a1a1a"
+            btn_disabled_bg = "#bbbbbb"
+            btn_disabled_text = "#888888"
             combo_view_bg, combo_sel = "#ffffff", "#b8d4f0"
+            combo_text = "#1a1a1a"
 
-        # 背景色只画在 container 上（根窗口透明）
-        self.container.setStyleSheet(f"""
+        # QSS 设到根窗口 self，这样能覆盖所有子控件（toolbar 和 container 都管到）
+        self.setStyleSheet(f"""
             #container {{
                 background-color: {bg_rgba};
                 border-radius: 12px;
             }}
-            #toolbar, #status {{ background-color: transparent; }}
+            #toolbar {{ background-color: {toolbar_bg}; }}
+            #status {{ background-color: transparent; }}
             QTextEdit {{
                 background-color: transparent;
                 color: {text};
@@ -296,9 +312,10 @@ class SubtitlePanel(QWidget):
                 border: 1px solid {btn_border};
                 border-radius: 5px;
                 padding: 4px 10px;
+                font-weight: bold;
             }}
             QPushButton:hover {{ background-color: {btn_hover}; }}
-            QPushButton:disabled {{ color: {btn_text}; background-color: rgba(128,128,128,30); }}
+            QPushButton:disabled {{ color: {btn_disabled_text}; background-color: {btn_disabled_bg}; }}
             QComboBox {{
                 background-color: {btn_bg};
                 color: {btn_text};
@@ -308,7 +325,7 @@ class SubtitlePanel(QWidget):
             }}
             QComboBox QAbstractItemView {{
                 background-color: {combo_view_bg};
-                color: {btn_text};
+                color: {combo_text};
                 selection-background-color: {combo_sel};
                 border: 1px solid {btn_border};
             }}
@@ -442,6 +459,7 @@ class SubtitlePanel(QWidget):
         self.toolbar.setVisible(True)
         self.status_label.setVisible(True)
         self.grip.setVisible(True)
+        self._layout_window()
 
     def _hide_overlays(self):
         # 关键防御：如果有任何弹窗控件正在交互（字体下拉、声音源下拉、数字框、菜单），
@@ -451,6 +469,7 @@ class SubtitlePanel(QWidget):
         self.toolbar.setVisible(False)
         self.status_label.setVisible(False)
         self.grip.setVisible(False)
+        self._layout_window()
 
     def _has_active_popup(self) -> bool:
         """是否有弹窗控件（下拉框/菜单）正处于活动状态。
@@ -491,9 +510,63 @@ class SubtitlePanel(QWidget):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        self.container.resize(self.size())
+        # 用户拖拽 grip 改变窗口尺寸。高度是"窗口总高"，换算成字幕区高度。
+        # 但要避免和 _layout_window 互相重入：只在非布局中处理。
+        if getattr(self, "_laying_out", False):
+            return
+        tb_h = self.toolbar.height() if self.toolbar.isVisible() else 0
+        new_content_h = max(self.minimumHeight(), self.height() - tb_h)
+        if new_content_h != getattr(self, "_content_h", None):
+            self._content_h = new_content_h
+        # 宽度变化或 content_h 变化，重新布局（保持 container 屏幕位置）
+        self._layout_window()
         self._update_toolbar_compact()
         self._notify_geometry()
+
+    def _layout_window(self):
+        """核心：工具栏显隐时改变窗口总高 + container 的 y，但 container 屏幕几何不变。
+
+        - 工具栏显示：窗口顶部上移 tb_h，container 仍在原屏幕位置（y=tb_h 相对窗口）
+        - 工具栏隐藏：窗口缩回，container 回到 y=0
+        这样字幕区位置/大小永远不变，行数不跳。
+        """
+        # 防御递归
+        if getattr(self, "_laying_out", False):
+            return
+        self._laying_out = True
+        try:
+            content_h = getattr(self, "_content_h", self.height())
+            content_w = self.width()
+            tb_visible = self.toolbar.isVisible()
+            tb_h = self.toolbar.sizeHint().height() if tb_visible else 0
+
+            # 记住 container 当前屏幕位置（要保持不变）
+            old_screen_pos = self.container.mapToGlobal(self.container.rect().topLeft()) \
+                if self.container.isVisible() else None
+
+            # 1) 窗口总高度 = 字幕区高度 + 工具栏高度
+            new_total_h = content_h + tb_h
+            if tb_visible:
+                # 显示工具栏：窗口顶部上移 tb_h，保持 container 屏幕位置
+                if old_screen_pos is not None:
+                    new_top = old_screen_pos.y() - tb_h
+                    self.setGeometry(self.x(), new_top, content_w, new_total_h)
+                else:
+                    self.resize(content_w, new_total_h)
+            else:
+                # 隐藏工具栏：窗口缩回，container 回到 y=0，保持屏幕位置
+                if old_screen_pos is not None:
+                    self.setGeometry(self.x(), old_screen_pos.y(), content_w, new_total_h)
+                else:
+                    self.resize(content_w, new_total_h)
+
+            # 2) 工具栏定位在窗口顶部
+            self.toolbar.setGeometry(0, 0, content_w, tb_h)
+            self.toolbar.raise_()
+            # 3) container 定位（紧跟工具栏下方）
+            self.container.setGeometry(0, tb_h, content_w, content_h)
+        finally:
+            self._laying_out = False
 
     def _add_expanding(self, layout, widget):
         """把 widget 加入布局，并设为水平拉伸——均匀填满整行，避免割裂空白。"""
@@ -529,8 +602,12 @@ class SubtitlePanel(QWidget):
 
     def _notify_geometry(self):
         if self.on_geometry_changed is not None:
-            g = self.geometry()
-            self.on_geometry_changed(g.x(), g.y(), g.width(), g.height(),
+            # 存字幕区(container)的屏幕几何，而非窗口总几何——
+            # 这样工具栏显隐导致的窗口高度/y变化不会被持久化，字幕区位置稳定。
+            cg = self.container.geometry()
+            screen_top = self.container.mapToGlobal(cg.topLeft())
+            self.on_geometry_changed(screen_top.x(), screen_top.y(),
+                                     cg.width(), cg.height(),
                                      self.ui_cfg.always_on_top, self._current_theme)
 
     # ---------- 对外接口 ----------
@@ -685,7 +762,8 @@ class SubtitlePanel(QWidget):
         return bool(self.windowFlags() & Qt.WindowStaysOnTopHint)
 
     def get_window_size(self):
-        return self.width(), self.height()
+        """返回字幕区尺寸（不含工具栏）。"""
+        return self.container.width(), self.container.height()
 
     def get_lock_scroll(self) -> bool:
         return getattr(self.ui_cfg, "lock_scroll_to_bottom", False)
@@ -745,9 +823,11 @@ class SubtitlePanel(QWidget):
             self._toggle_pin()
 
     def set_window_size(self, w: int, h: int):
+        """设置字幕区尺寸（h 是字幕区高度，不含工具栏）。"""
         w = max(self.minimumWidth(), int(w))
         h = max(self.minimumHeight(), int(h))
-        self.resize(w, h)
+        self._content_h = h
+        self._layout_window()
         self._notify_geometry()
 
     def set_lock_scroll(self, locked: bool):
