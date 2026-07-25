@@ -1,0 +1,26 @@
+# ASR
+funasr==1.3.29
+
+# 音频（soundcard 用于 Windows WASAPI loopback，捕获系统声音）
+soundcard
+soundfile
+numpy
+librosa
+
+# UI
+PyQt5
+
+# 配置
+PyYAML
+
+# ============================================================
+# 重要：torch / torchaudio 不能用本文件直接装！
+# 若直接 `pip install -r requirements.txt`，pip 会从默认 PyPI 装 CPU 版。
+# torch 的 GPU 版只在 PyTorch 官方 CUDA 索引提供，必须单独装：
+#
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+#
+# 装完验证：
+#   python -c "import torch; print(torch.cuda.is_available())"
+# 必须输出 True。
+# ============================================================

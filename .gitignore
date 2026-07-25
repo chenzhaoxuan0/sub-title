@@ -1,0 +1,30 @@
+# 测试音频/视频文件（含版权内容，绝不提交）
+test/
+captured.wav
+*.wav
+*.mp3
+*.mp4
+*.m4a
+*.ogg
+*.flac
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+.env
+
+# 模型缓存（FunASR 首次运行下载到此处）
+.cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# ZCode 工具内部文件
+.zcode/

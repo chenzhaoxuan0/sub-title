@@ -1,0 +1,16 @@
+name: subtitle
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      # torch 的 GPU 版必须从 PyTorch 官方 CUDA 索引装，见 README。
+      # 这里不放 torch，避免 pip 装成 CPU 版。
+      - funasr==1.3.29
+      - soundcard
+      - soundfile
+      - numpy
+      - librosa
+      - PyQt5
+      - PyYAML

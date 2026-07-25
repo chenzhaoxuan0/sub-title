@@ -1,0 +1,28 @@
+audio:
+  target_sample_rate: 16000
+  chunk_seconds: 0.6
+  input_device: null
+asr:
+  model: paraformer-zh-streaming
+  device: cuda
+  chunk_size:
+  - 0
+  - 10
+  - 5
+  encoder_chunk_look_back: 4
+  decoder_chunk_look_back: 1
+  disable_update: true
+  punc_model: ct-punc
+ui:
+  font_family: Microsoft YaHei
+  font_size: 22
+  window_opacity: 0.87
+  max_chars: 20000
+  theme: dark
+  always_on_top: true
+  win_x: 1304
+  win_y: 1684
+  win_w: 1456
+  win_h: 201
+  close_action: ask           # 点✕时：ask=每次询问 / hide=直接隐藏到托盘 / quit=直接退出
+  toolbar_hide_delay_ms: 800  # 工具栏无操作后自动隐藏的延时（毫秒）
