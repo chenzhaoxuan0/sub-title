@@ -1,58 +1,68 @@
-"""FunASR Paraformer 流式引擎实现。
+"""FunASR Paraformer 流式引擎实现（事件驱动接口）。
 
 模型：paraformer-zh-streaming（online 版）
-chunk_size=[0,10,5], stride=10*960=9600 samples≈600ms
-靠 cache 字典在 chunk 间维持 KV cache。
+feed 内部同步调 model.generate(cache 维持状态)，有结果就走 on_result 回调。
 """
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 
-from .base import AsrEngine, AsrResult
-from ..config import AsrConfig
+from .base import AsrEngine, OnResult
 
 
 class FunAsrEngine(AsrEngine):
-    def __init__(self, cfg: AsrConfig):
-        self.cfg = cfg
+    def __init__(self, cfg, on_result: OnResult):
+        super().__init__(cfg, on_result)
         self.model = None
         self.cache: dict = {}
 
     def load(self) -> None:
-        # 延迟导入：funasr import 较慢，且依赖 torch，只在真正用时加载
         from funasr import AutoModel
-        kwargs = dict(
+        print(f"[funasr] 加载模型 {self.cfg.model} (device={self.cfg.device})，首次会下载...")
+        self.model = AutoModel(
             model=self.cfg.model,
             device=self.cfg.device,
-            disable_update=self.cfg.disable_update,
+            disable_update=getattr(self.cfg, "disable_update", True),
         )
-        print(f"[funasr] 加载模型 {self.cfg.model} (device={self.cfg.device})，首次会下载...")
-        self.model = AutoModel(**kwargs)
         print("[funasr] 模型就绪")
 
-    def transcribe_chunk(
-        self,
-        chunk: np.ndarray,
-        is_final: bool = False,
-    ) -> Optional[AsrResult]:
+    def feed(self, chunk: np.ndarray) -> None:
         if self.model is None:
             raise RuntimeError("模型未加载，先调 load()")
+        try:
+            res = self.model.generate(
+                input=chunk,
+                cache=self.cache,
+                is_final=False,
+                chunk_size=self.cfg.chunk_size,
+                encoder_chunk_look_back=self.cfg.encoder_chunk_look_back,
+                decoder_chunk_look_back=self.cfg.decoder_chunk_look_back,
+                language="zh",
+                use_itn=True,
+            )
+            if res and res[0].get("text"):
+                self.on_result(res[0]["text"], False)
+        except Exception as e:
+            print(f"[funasr] feed 异常: {e}")
 
-        res = self.model.generate(
-            input=chunk,
-            cache=self.cache,
-            is_final=is_final,
-            chunk_size=self.cfg.chunk_size,
-            encoder_chunk_look_back=self.cfg.encoder_chunk_look_back,
-            decoder_chunk_look_back=self.cfg.decoder_chunk_look_back,
-            language="zh",
-            use_itn=True,
-        )
-        if res and res[0].get("text"):
-            return AsrResult(text=res[0]["text"], is_final=is_final)
-        return None
+    def stop(self) -> None:
+        # 发 final chunk 触发尾部 flush（可选，这里简单清 cache）
+        try:
+            if self.model is not None:
+                # 喂一个空 final 触发收尾
+                self.model.generate(
+                    input=np.zeros(960, dtype=np.float32),
+                    cache=self.cache,
+                    is_final=True,
+                    chunk_size=self.cfg.chunk_size,
+                    encoder_chunk_look_back=self.cfg.encoder_chunk_look_back,
+                    decoder_chunk_look_back=self.cfg.decoder_chunk_look_back,
+                    language="zh",
+                    use_itn=True,
+                )
+        except Exception:
+            pass
+        self.cache = {}
 
     def reset(self) -> None:
         self.cache = {}

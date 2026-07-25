@@ -1,10 +1,10 @@
-"""端到端实时测试：soundcard 采集系统声音 + FunASR 流式转写，实时打印。
+"""端到端实时测试：soundcard 采集系统声音 + ASR 引擎实时转写，实时打印。
 
 用法：
   python scripts/live_asr.py
 
-跑起来后，去播放任意中文视频/音频，会看到实时识别出的中文。
-Ctrl+C 停止。
+引擎由 config.yaml 的 asr.engine_type 决定（funasr/sensevoice/aliyun）。
+跑起来后去播放任意中文视频/音频，会看到实时识别出的中文。Ctrl+C 停止。
 """
 import sys
 import time
@@ -13,17 +13,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np
 from subtitle.config import load_config
-from subtitle.asr import FunAsrEngine
+from subtitle.asr import create_engine
 from subtitle.audio import SystemAudioCapture
 
 
 def main():
     cfg = load_config()
+    print(f"=== 使用引擎: {cfg.asr.engine_type} ===")
     target_sr = cfg.audio.target_sample_rate
     chunk_samples = int(round(cfg.audio.chunk_seconds * target_sr))
 
-    print("=== 加载 FunASR 模型 ===")
-    engine = FunAsrEngine(cfg.asr)
+    engine = create_engine(cfg, on_result=lambda t, f: print(t, end="", flush=True))
     engine.load()
 
     print("\n=== 启动系统声音采集 ===")
@@ -51,12 +51,11 @@ def main():
             while len(buf) >= chunk_samples:
                 block = buf[:chunk_samples]
                 buf = buf[chunk_samples:]
-                r = engine.transcribe_chunk(block, is_final=False)
-                if r and r.text:
-                    print(r.text, end="", flush=True)
+                engine.feed(block)   # 事件驱动：feed 不返回，结果走回调
     except KeyboardInterrupt:
         print("\n\n[停止]")
     finally:
+        engine.stop()
         cap.stop()
 
 

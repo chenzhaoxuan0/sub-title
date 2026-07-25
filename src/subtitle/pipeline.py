@@ -1,9 +1,7 @@
-"""管线总装：采集线程 → 归一化 → 队列 → 推理线程 → 回调。
+"""管线总装：采集线程 → 归一化 → 队列 → 推理线程 → engine.feed。
 
-把音频捕获和 ASR 解耦：capture 只管塞 PCM，inference 只管消费。
-归一化（重采样到 16k mono）在 capture 回调里就地做。
-
-UI 层（或命令行调试）通过 on_text 回调拿结果。
+引擎接口是事件驱动的（feed 单向喂入，结果走 on_result 回调），
+所以 pipeline 的推理线程只负责把 chunk 喂给 engine，结果回调直接调 on_text。
 """
 from __future__ import annotations
 
@@ -15,13 +13,15 @@ import numpy as np
 
 from .audio import SystemAudioCapture, normalize_pcm
 from .config import Config
-from .asr.base import AsrEngine, AsrResult
+from .asr.base import AsrEngine
+from .asr.factory import create_engine
 
 
 class SubtitlePipeline:
     """串起采集与推理的控制器。
 
-    on_text(text: str, is_final: bool): 每次有增量文字时调（已在推理线程，UI 层需自行 dispatch）。
+    on_text(text, is_final): 每次有文字时调（在推理线程或 engine 内部线程，
+    UI 层需自行用 Qt signal 桥接主线程）。
     """
 
     def __init__(
@@ -45,10 +45,11 @@ class SubtitlePipeline:
     def start(self) -> None:
         if self._running.is_set():
             return
-        # 1) 加载模型（在主线程，避免 UI 卡顿期间提前暴露异常）
+        # 1) 加载引擎（在 worker 线程，避免 UI 卡顿期间暴露异常）
+        #    引擎的 on_result 回调直接调本 pipeline 的 on_text
         self.engine.load()
 
-        # 2) 启动采集（soundcard recorder 已做重采样到 target_sr/mono）
+        # 2) 启动采集（soundcard recorder 已重采样到 target_sr/mono）
         self._capture = SystemAudioCapture(
             target_sr=self.target_sr,
             block_samples=self.chunk_samples,
@@ -63,6 +64,11 @@ class SubtitlePipeline:
 
     def stop(self) -> None:
         self._running.clear()
+        # 通知引擎停止（发 final / flush / 断连）
+        try:
+            self.engine.stop()
+        except Exception as e:
+            print(f"[pipeline] engine.stop 异常: {e}")
         if self._capture is not None:
             self._capture.stop()
         if self._infer_thread is not None:
@@ -84,20 +90,15 @@ class SubtitlePipeline:
             chunk = normalize_pcm(raw, src_sr=src_sr, dst_sr=self.target_sr)
             self._buf = np.concatenate([self._buf, chunk])
 
-            # 按固定长度切块喂模型
+            # 按固定长度切块喂引擎（引擎内部决定怎么用这个 chunk）
             while len(self._buf) >= self.chunk_samples:
                 block = self._buf[: self.chunk_samples]
-                self._buf = self._buf[self.chunk_samples :]
-                self._consume(block, is_final=False)
+                self._buf = self._buf[self.chunk_samples:]
+                self._feed_engine(block)
 
-    def _consume(self, block: np.ndarray, is_final: bool) -> None:
+    def _feed_engine(self, block: np.ndarray) -> None:
+        """把一个 chunk 喂给引擎。结果由引擎通过 on_result 回调推送。"""
         try:
-            r: Optional[AsrResult] = self.engine.transcribe_chunk(block, is_final=is_final)
+            self.engine.feed(block)
         except Exception as e:
-            print(f"[pipeline] 推理异常: {e}")
-            return
-        if r and r.text:
-            try:
-                self.on_text(r.text, r.is_final)
-            except Exception as e:
-                print(f"[pipeline] on_text 异常: {e}")
+            print(f"[pipeline] engine.feed 异常: {e}")

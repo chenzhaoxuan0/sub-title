@@ -13,21 +13,22 @@ from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QSpinBox,
     QCheckBox, QDialogButtonBox, QLabel, QGroupBox, QTabWidget, QWidget,
     QTextEdit, QPushButton, QFontComboBox, QApplication, QMessageBox,
+    QLineEdit, QStackedWidget, QDoubleSpinBox,
 )
 
-from ..config import UiConfig
+from ..config import Config
 
 
 class SettingsDialog(QDialog):
-    """设置对话框。持有 panel 引用，直接驱动 panel 做改动。"""
+    """设置对话框。持有完整 Config 引用，直接驱动 panel 做改动。"""
 
-    def __init__(self, cfg: UiConfig, panel, parent=None):
+    def __init__(self, cfg: Config, panel, parent=None):
         super().__init__(parent)
-        self.cfg = cfg
+        self.cfg = cfg          # 完整 Config（含 asr/audio/ui）
         self.panel = panel
         self.setWindowTitle("设置")
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-        self.resize(520, 560)
+        self.resize(520, 620)
         self._init_ui()
         self._load_current_state()
 
@@ -71,6 +72,61 @@ class SettingsDialog(QDialog):
         recog_btns.addWidget(self.stop_btn)
         recog_btns.addStretch(1)
         f_recog.addRow("", recog_btns)
+
+        # ---- 引擎选择 + 动态配置 ----
+        self.engine_combo = QComboBox()
+        self.engine_combo.addItem("本地 FunASR（流式，需GPU）", "funasr")
+        self.engine_combo.addItem("本地 SenseVoice（小模型，CPU可跑）", "sensevoice")
+        self.engine_combo.addItem("阿里云 API（流式，任意平台）", "aliyun")
+        f_recog.addRow("识别引擎：", self.engine_combo)
+
+        # 各引擎的配置面板（QStackedWidget 按下拉切换）
+        self.engine_stack = QStackedWidget()
+
+        # FunASR 面板
+        funasr_panel = QWidget()
+        fp = QFormLayout(funasr_panel)
+        self.funasr_device_combo = QComboBox()
+        self.funasr_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
+        self.funasr_device_combo.addItem("CPU", "cpu")
+        fp.addRow("设备：", self.funasr_device_combo)
+        self.engine_stack.addWidget(funasr_panel)
+
+        # SenseVoice 面板
+        sv_panel = QWidget()
+        sp = QFormLayout(sv_panel)
+        self.sv_device_combo = QComboBox()
+        self.sv_device_combo.addItem("CPU（推荐，Mac/弱GPU）", "cpu")
+        self.sv_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
+        sp.addRow("设备：", self.sv_device_combo)
+        self.sv_segment_spin = QDoubleSpinBox()
+        self.sv_segment_spin.setRange(0.5, 5.0)
+        self.sv_segment_spin.setSingleStep(0.5)
+        self.sv_segment_spin.setSuffix(" 秒")
+        sp.addRow("攒段时长（越小延迟越低）：", self.sv_segment_spin)
+        self.engine_stack.addWidget(sv_panel)
+
+        # 阿里云面板
+        aliyun_panel = QWidget()
+        ap = QFormLayout(aliyun_panel)
+        self.aliyun_akid_edit = QLineEdit()
+        self.aliyun_akid_edit.setPlaceholderText("AccessKey ID")
+        ap.addRow("AccessKey ID：", self.aliyun_akid_edit)
+        self.aliyun_aksecret_edit = QLineEdit()
+        self.aliyun_aksecret_edit.setPlaceholderText("AccessKey Secret")
+        self.aliyun_aksecret_edit.setEchoMode(QLineEdit.Password)
+        ap.addRow("AccessKey Secret：", self.aliyun_aksecret_edit)
+        self.aliyun_appkey_edit = QLineEdit()
+        self.aliyun_appkey_edit.setPlaceholderText("AppKey（控制台项目）")
+        ap.addRow("AppKey：", self.aliyun_appkey_edit)
+        aliyun_hint = QLabel("凭证存于本地 config.yaml，不上传。需先装 nls SDK（见 README）")
+        aliyun_hint.setStyleSheet("color: #888; font-size: 11px;")
+        aliyun_hint.setWordWrap(True)
+        ap.addRow("", aliyun_hint)
+        self.engine_stack.addWidget(aliyun_panel)
+
+        f_recog.addRow("引擎配置：", self.engine_stack)
+        self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
         v.addWidget(g_recog)
 
         # ---- 外观 ----
@@ -189,8 +245,25 @@ class SettingsDialog(QDialog):
 
     # ---------- 加载当前状态 ----------
     def _load_current_state(self):
+        ui = self.cfg.ui
+        asr = self.cfg.asr
         # 识别按钮初始状态
         self._update_recog_buttons()
+        # 引擎选择
+        idx = self.engine_combo.findData(asr.engine_type)
+        self.engine_combo.setCurrentIndex(max(0, idx))
+        self._sync_engine_panel()
+        # FunASR 配置
+        self.funasr_device_combo.setCurrentIndex(
+            max(0, self.funasr_device_combo.findData(asr.device)))
+        # SenseVoice 配置
+        self.sv_device_combo.setCurrentIndex(
+            max(0, self.sv_device_combo.findData(asr.sensevoice_device)))
+        self.sv_segment_spin.setValue(asr.sensevoice_segment_seconds)
+        # 阿里云配置
+        self.aliyun_akid_edit.setText(asr.aliyun_access_key_id)
+        self.aliyun_aksecret_edit.setText(asr.aliyun_access_key_secret)
+        self.aliyun_appkey_edit.setText(asr.aliyun_appkey)
         # 外观
         self.theme_combo.setCurrentIndex(
             max(0, self.theme_combo.findData(self.panel.get_theme())))
@@ -205,10 +278,19 @@ class SettingsDialog(QDialog):
         self.topmost_check.setChecked(self.panel.get_pin())
         self.lock_scroll_check.setChecked(self.panel.get_lock_scroll())
         self.close_combo.setCurrentIndex(
-            max(0, self.close_combo.findData(self.cfg.close_action)))
-        self.delay_spin.setValue(self.cfg.toolbar_hide_delay_ms)
+            max(0, self.close_combo.findData(ui.close_action)))
+        self.delay_spin.setValue(ui.toolbar_hide_delay_ms)
         # 字幕
-        self.maxchars_spin.setValue(self.cfg.max_chars)
+        self.maxchars_spin.setValue(ui.max_chars)
+
+    def _on_engine_changed(self, _idx: int):
+        self._sync_engine_panel()
+
+    def _sync_engine_panel(self):
+        """根据引擎下拉切换配置面板。"""
+        etype = self.engine_combo.currentData()
+        idx = {"funasr": 0, "sensevoice": 1, "aliyun": 2}.get(etype, 0)
+        self.engine_stack.setCurrentIndex(idx)
 
     def _update_recog_buttons(self):
         running = self.panel.is_recording()
@@ -258,6 +340,16 @@ class SettingsDialog(QDialog):
     # ---------- 应用（把设置控件值写回 panel + config）----------
     def _on_apply(self):
         p = self.panel
+        # ASR 引擎配置写回（下次启动识别时生效）
+        asr = self.cfg.asr
+        asr.engine_type = self.engine_combo.currentData()
+        asr.device = self.funasr_device_combo.currentData()
+        asr.sensevoice_device = self.sv_device_combo.currentData()
+        asr.sensevoice_segment_seconds = self.sv_segment_spin.value()
+        asr.aliyun_access_key_id = self.aliyun_akid_edit.text().strip()
+        asr.aliyun_access_key_secret = self.aliyun_aksecret_edit.text().strip()
+        asr.aliyun_appkey = self.aliyun_appkey_edit.text().strip()
+        # 外观/窗口/行为（驱动 panel 即时生效）
         p.set_theme(self.theme_combo.currentData())
         p.set_font_family(self.font_combo.currentFont().family())
         p.set_font_size(self.font_size_spin.value())

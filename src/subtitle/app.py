@@ -11,7 +11,8 @@ from PyQt5.QtCore import QObject, QThread, pyqtSignal
 from PyQt5.QtWidgets import QApplication
 
 from .config import load_config, DEFAULT_CONFIG_PATH
-from .asr import FunAsrEngine
+from .asr import create_engine
+from .asr.base import AsrEngine
 from .pipeline import SubtitlePipeline
 from .ui import SubtitlePanel, TrayController, SettingsDialog
 
@@ -30,14 +31,17 @@ class _PipelineWorker(QObject):
         super().__init__()
         self.cfg = cfg
         self.device_name = device_name
-        self.engine: FunAsrEngine | None = None
+        self.engine: AsrEngine | None = None
         self.pipeline: SubtitlePipeline | None = None
 
     def run(self):
         try:
             if self.device_name:
                 self.cfg.audio.input_device = self.device_name
-            self.engine = FunAsrEngine(self.cfg.asr)
+            # 引擎的 on_result 回调 → 转 Qt signal 桥接到主线程
+            def on_result(text: str, is_final: bool):
+                self.text.emit(text, is_final)
+            self.engine = create_engine(self.cfg, on_result=on_result)
             self.pipeline = SubtitlePipeline(
                 self.cfg, self.engine,
                 on_text=lambda t, f: self.text.emit(t, f),
@@ -150,8 +154,8 @@ class SubtitleApp:
 
     # ---------- 设置 ----------
     def _open_settings(self):
-        """打开全功能设置对话框。对话框直接驱动 panel，关闭后持久化。"""
-        dlg = SettingsDialog(self.cfg.ui, self.panel, parent=None)
+        """打开全功能设置对话框。传完整 cfg（含 asr），关闭后持久化。"""
+        dlg = SettingsDialog(self.cfg, self.panel, parent=None)
         dlg.exec_()
         # 对话框关闭后保存配置（应用时已通过 panel setter 改了 cfg.ui）
         self._save_config()

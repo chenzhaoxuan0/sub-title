@@ -23,6 +23,10 @@ class AudioConfig:
 
 @dataclass
 class AsrConfig:
+    # 引擎选择：funasr（本地流式）/ sensevoice（本地段式小模型）/ aliyun（阿里云API）
+    engine_type: str = "funasr"
+
+    # ---- FunASR（paraformer-zh-streaming）----
     model: str = "paraformer-zh-streaming"
     device: str = "cuda"
     chunk_size: list = field(default_factory=lambda: [0, 10, 5])
@@ -30,6 +34,17 @@ class AsrConfig:
     decoder_chunk_look_back: int = 1
     disable_update: bool = True
     punc_model: str = "ct-punc"
+
+    # ---- SenseVoice（段式，CPU 可跑）----
+    sensevoice_model: str = "iic/SenseVoiceSmall"
+    sensevoice_device: str = "cpu"          # cpu / cuda（Mac 用 cpu）
+    sensevoice_segment_seconds: float = 2.0  # 攒段时长，越小延迟越低但易切词
+
+    # ---- 阿里云 NLS API ----
+    aliyun_access_key_id: str = ""
+    aliyun_access_key_secret: str = ""
+    aliyun_appkey: str = ""
+    aliyun_region: str = "cn-shanghai"
 
 
 @dataclass
