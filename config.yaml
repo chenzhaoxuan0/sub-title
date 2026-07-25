@@ -14,15 +14,18 @@ asr:
   disable_update: true
   punc_model: ct-punc
 ui:
-  font_family: Microsoft YaHei
-  font_size: 22
+  font_family: MiSans VF Medium
+  font_size: 28
   window_opacity: 0.87
   max_chars: 20000
   theme: dark
   always_on_top: true
-  win_x: 1304
-  win_y: 1684
-  win_w: 1456
-  win_h: 201
-  close_action: ask           # 点✕时：ask=每次询问 / hide=直接隐藏到托盘 / quit=直接退出
-  toolbar_hide_delay_ms: 800  # 工具栏无操作后自动隐藏的延时（毫秒）
+  win_x: 641
+  win_y: 1409
+  win_w: 1014
+  win_h: 231
+  close_action: ask
+  toolbar_hide_delay_ms: 800
+  lock_scroll_to_bottom: true
+  min_win_w: 480
+  min_win_h: 120

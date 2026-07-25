@@ -150,26 +150,11 @@ class SubtitleApp:
 
     # ---------- 设置 ----------
     def _open_settings(self):
-        """打开设置对话框。应用后同步 UI + 持久化。"""
-        # 设置改了之后需要同步到面板的几个地方
-        def on_apply():
-            # 工具栏隐藏延时
-            self.panel._hide_timer.setInterval(self.cfg.ui.toolbar_hide_delay_ms)
-            # 主题
-            if self.panel._current_theme != self.cfg.ui.theme:
-                self.panel._current_theme = self.cfg.ui.theme
-            self.panel._apply_theme()
-            # 置顶：检测当前状态，与配置不一致则切换
-            from PyQt5.QtCore import Qt
-            pinned = bool(self.panel.windowFlags() & Qt.WindowStaysOnTopHint)
-            want_top = self.cfg.ui.always_on_top
-            if pinned != want_top:
-                self.panel._toggle_pin()
-            self.panel._notify_geometry()
-            self._save_config()
-
-        dlg = SettingsDialog(self.cfg.ui, on_apply=on_apply, parent=None)
+        """打开全功能设置对话框。对话框直接驱动 panel，关闭后持久化。"""
+        dlg = SettingsDialog(self.cfg.ui, self.panel, parent=None)
         dlg.exec_()
+        # 对话框关闭后保存配置（应用时已通过 panel setter 改了 cfg.ui）
+        self._save_config()
 
     # ---------- 退出 ----------
     def _quit(self):

@@ -181,29 +181,42 @@ class SubtitlePanel(QWidget):
         self.pin_btn.clicked.connect(self._toggle_pin)
         self.theme_btn.clicked.connect(self._toggle_theme)
         self.close_btn.clicked.connect(self._on_close)
-        # 字体切换
-        self.font_combo.currentFontChanged.connect(self._on_font_changed)
+        # 字体切换：用 activated（用户真正选中并确认时才触发，而非 hover 每一项），
+        # 避免 currentFontChanged 在弹窗存活期间高频回调导致崩溃
+        self.font_combo.activated.connect(self._on_font_activated)
         # 透明度：滑块和输入框双向联动
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self.opacity_slider.sliderReleased.connect(self._notify_geometry)
         self.opacity_spin.valueChanged.connect(self._on_opacity_changed)
         # 避免互相触发时死循环：在 _on_opacity_changed 里临时阻塞信号
 
-        tb.addWidget(QLabel("声音源："))
-        tb.addWidget(self.device_combo, 1)
-        tb.addWidget(self.start_btn)
-        tb.addWidget(self.stop_btn)
-        tb.addWidget(self.clear_btn)
-        tb.addWidget(QLabel("字体："))
+        self._device_label = QLabel("声音源：")
+        tb.addWidget(self._device_label)
+        tb.addWidget(self.device_combo)   # 下拉框保持自然宽度，不拉伸
+        # 按钮设为水平拉伸，均匀填满整行，避免缩小后出现割裂空白
+        self._add_expanding(tb, self.start_btn)
+        self._add_expanding(tb, self.stop_btn)
+        self._add_expanding(tb, self.clear_btn)
+        self._font_label = QLabel("字体：")
+        tb.addWidget(self._font_label)
         tb.addWidget(self.font_combo)
-        tb.addWidget(self.font_dec_btn)
-        tb.addWidget(self.font_inc_btn)
-        tb.addWidget(self.pin_btn)
-        tb.addWidget(self.theme_btn)
-        tb.addWidget(QLabel("🌫"))
-        tb.addWidget(self.opacity_slider)
-        tb.addWidget(self.opacity_spin)
-        tb.addWidget(self.close_btn)
+        self._add_expanding(tb, self.font_dec_btn)
+        self._add_expanding(tb, self.font_inc_btn)
+        self._add_expanding(tb, self.pin_btn)
+        self._add_expanding(tb, self.theme_btn)
+        # 透明度：标签 + 滑动条 装进一个紧贴的小容器，避免被工具栏 stretch 拉开
+        # 整体作为一个 widget 加入工具栏，缩小时一起隐藏
+        self.opacity_group = QWidget()
+        self.opacity_group.setObjectName("opacity_group")
+        og_layout = QHBoxLayout(self.opacity_group)
+        og_layout.setContentsMargins(0, 0, 0, 0)
+        og_layout.setSpacing(4)
+        self._opacity_label = QLabel("透明度")
+        og_layout.addWidget(self._opacity_label)
+        og_layout.addWidget(self.opacity_slider, 1)   # 滑条在组内拉伸填满
+        tb.addWidget(self.opacity_group)
+        self._add_expanding(tb, self.opacity_spin)
+        self._add_expanding(tb, self.close_btn)
 
         # ---- 状态栏 ----
         self.status_label = QLabel("就绪")
@@ -236,9 +249,16 @@ class SubtitlePanel(QWidget):
         self.grip.setVisible(False)
 
     def _restore_geometry(self):
+        # 最小尺寸（放大下限，避免缩太小）
+        self.setMinimumSize(
+            getattr(self.ui_cfg, "min_win_w", 480),
+            getattr(self.ui_cfg, "min_win_h", 120),
+        )
         self.resize(self.ui_cfg.win_w or 760, self.ui_cfg.win_h or 150)
         if self.ui_cfg.win_x is not None and self.ui_cfg.win_y is not None:
             self.move(self.ui_cfg.win_x, self.ui_cfg.win_y)
+        # 初始化时按当前宽度决定工具栏是否精简
+        self._update_toolbar_compact()
 
     # ---------- 主题 ----------
     def _apply_theme(self):
@@ -351,11 +371,23 @@ class SubtitlePanel(QWidget):
 
     # ---------- 字体/字号 ----------
     def _apply_font(self):
-        """把当前字体+字号应用到字幕区。"""
-        self.view.setFont(QFont(self.ui_cfg.font_family, self._font_size))
+        """把当前字体+字号应用到字幕区。加保护防崩溃。"""
+        try:
+            self.view.setFont(QFont(self.ui_cfg.font_family, self._font_size))
+        except Exception as e:
+            print(f"[ui] 应用字体失败: {e}")
+
+    def _on_font_activated(self, index: int):
+        """用户在字体下拉框真正选中某项（回车/点击）时触发。
+        用 activated 而非 currentFontChanged，避免弹窗存活期间 hover 高频回调崩溃。
+        """
+        font = self.font_combo.currentFont()
+        self.ui_cfg.font_family = font.family()
+        self._apply_font()
+        self._notify_geometry()
 
     def _on_font_changed(self, font: QFont):
-        """字体下拉框切换时。"""
+        """字体下拉框切换时（保留供外部调用）。"""
         self.ui_cfg.font_family = font.family()
         self._apply_font()
         self._notify_geometry()
@@ -460,7 +492,40 @@ class SubtitlePanel(QWidget):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self.container.resize(self.size())
+        self._update_toolbar_compact()
         self._notify_geometry()
+
+    def _add_expanding(self, layout, widget):
+        """把 widget 加入布局，并设为水平拉伸——均匀填满整行，避免割裂空白。"""
+        from PyQt5.QtWidgets import QSizePolicy
+        widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        layout.addWidget(widget)
+
+    def _update_toolbar_compact(self):
+        """按窗口宽度渐进式隐藏工具栏控件。
+
+        从 1200px 起逐渐隐藏（间隔75），到 600px 停止；
+        最终最小窗口只保留：透明度输入框 / A+ / A-。
+        """
+        w = self.width()
+        # (控件列表, 隐藏阈值)：宽度 < 阈值 时该组隐藏
+        # 从 1200px 起逐步隐藏（间隔75），到 600px 停止隐藏；
+        # 最小窗口(480)时只剩 透明度输入/A+/A-
+        hide_rules = [
+            ([self.pin_btn], 1200),
+            ([self._font_label, self.font_combo], 1125),
+            ([self._device_label, self.device_combo], 1050),
+            ([self.clear_btn], 975),
+            ([self.theme_btn], 900),
+            ([self.close_btn], 825),
+            ([self.opacity_group], 750),
+            ([self.start_btn], 675),
+            ([self.stop_btn], 600),
+        ]
+        for widgets, threshold in hide_rules:
+            hide = w < threshold
+            for wid in widgets:
+                wid.setVisible(not hide)
 
     def _notify_geometry(self):
         if self.on_geometry_changed is not None:
@@ -484,7 +549,10 @@ class SubtitlePanel(QWidget):
         cursor.movePosition(QTextCursor.End)
         cursor.insertText(text)
         self._trim_if_needed()
-        if at_bottom:
+        # 锁定模式：强制跟到底，无视用户位置
+        if getattr(self.ui_cfg, "lock_scroll_to_bottom", False):
+            bar.setValue(bar.maximum())
+        elif at_bottom:
             bar.setValue(bar.maximum())
         else:
             bar.setValue(saved_pos)
@@ -595,3 +663,136 @@ class SubtitlePanel(QWidget):
         self._notify_geometry()
         self.quit_requested.emit()
         self.close()
+
+    # ============================================================
+    # 公共 API（供 SettingsDialog 驱动，避免逻辑分叉）
+    # ============================================================
+
+    # ---------- 读取 ----------
+    def get_font_family(self) -> str:
+        return self.ui_cfg.font_family
+
+    def get_font_size(self) -> int:
+        return self._font_size
+
+    def get_opacity(self) -> int:
+        return int(round(self.ui_cfg.window_opacity * 100))
+
+    def get_theme(self) -> str:
+        return self._current_theme
+
+    def get_pin(self) -> bool:
+        return bool(self.windowFlags() & Qt.WindowStaysOnTopHint)
+
+    def get_window_size(self):
+        return self.width(), self.height()
+
+    def get_lock_scroll(self) -> bool:
+        return getattr(self.ui_cfg, "lock_scroll_to_bottom", False)
+
+    def get_transcript(self) -> str:
+        """完整字幕文本（供文稿回看）。"""
+        return self.view.toPlainText()
+
+    def get_devices(self):
+        """返回 [(显示名, data)] 列表，data 是设备名或 None。"""
+        out = []
+        for i in range(self.device_combo.count()):
+            out.append((self.device_combo.itemText(i), self.device_combo.itemData(i)))
+        return out
+
+    def is_recording(self) -> bool:
+        return self.stop_btn.isEnabled()  # 运行中时停止按钮可用
+
+    # ---------- 设置（立即生效）----------
+    def set_font_family(self, name: str):
+        self.ui_cfg.font_family = name
+        self._apply_font()
+        # 同步工具栏字体框
+        self.font_combo.blockSignals(True)
+        self.font_combo.setCurrentFont(QFont(name))
+        self.font_combo.blockSignals(False)
+
+    def set_font_size(self, size: int):
+        self._font_size = max(8, min(72, int(size)))
+        self.ui_cfg.font_size = self._font_size
+        self._apply_font()
+
+    def set_opacity(self, value: int):
+        value = max(0, min(100, int(value)))
+        self.ui_cfg.window_opacity = value / 100.0
+        # 同步工具栏控件
+        self.opacity_slider.blockSignals(True)
+        self.opacity_spin.blockSignals(True)
+        self.opacity_slider.setValue(value)
+        self.opacity_spin.setValue(value)
+        self.opacity_slider.blockSignals(False)
+        self.opacity_spin.blockSignals(False)
+        self._apply_theme()
+
+    def set_theme(self, name: str):
+        if name not in THEMES:
+            return
+        if self._current_theme != name:
+            self._current_theme = name
+            self.theme_btn.setText("🌙" if name == "dark" else "☀️")
+            self._apply_theme()
+            self.ui_cfg.theme = name
+            self._notify_geometry()
+
+    def set_pin(self, pinned: bool):
+        if self.get_pin() != pinned:
+            self._toggle_pin()
+
+    def set_window_size(self, w: int, h: int):
+        w = max(self.minimumWidth(), int(w))
+        h = max(self.minimumHeight(), int(h))
+        self.resize(w, h)
+        self._notify_geometry()
+
+    def set_lock_scroll(self, locked: bool):
+        self.ui_cfg.lock_scroll_to_bottom = bool(locked)
+        if locked:
+            self.scroll_to_bottom_now()
+
+    def scroll_to_bottom_now(self):
+        """立刻滚动到字幕最底部。"""
+        bar = self.view.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def clear_transcript(self):
+        self.view.clear()
+
+    def set_toolbar_hide_delay(self, ms: int):
+        self.ui_cfg.toolbar_hide_delay_ms = int(ms)
+        self._hide_timer.setInterval(int(ms))
+
+    def set_max_chars(self, n: int):
+        self.ui_cfg.max_chars = int(n)
+
+    def set_close_action(self, action: str):
+        self.ui_cfg.close_action = action
+
+    # ---------- 识别控制（包装内部方法，供设置对话框按钮）----------
+    def start_recognition(self, device_name=None):
+        """device_name 为 None 时用当前下拉选择。"""
+        if device_name is None:
+            device_name = self.device_combo.currentData()
+        self._on_start_with_device(device_name)
+
+    def stop_recognition(self):
+        self._on_stop()
+
+    def _on_start_with_device(self, device_name):
+        # 复用 _on_start 的逻辑，但显式传 device
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.device_combo.setEnabled(False)
+        self.set_status("启动中……")
+        if self.on_start:
+            try:
+                self.on_start(device_name)
+            except Exception as e:
+                self.set_status(f"出错：{e}")
+                self._reset_buttons()
+

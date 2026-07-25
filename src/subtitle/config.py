@@ -49,6 +49,11 @@ class UiConfig:
     close_action: str = "ask"
     # 工具栏无操作后自动隐藏的延时（毫秒）
     toolbar_hide_delay_ms: int = 800
+    # 锁定滚动到底部：开启后新字幕进来强制跟随，无视用户滚动位置
+    lock_scroll_to_bottom: bool = False
+    # 窗口最小尺寸（放大下限，避免缩太小没法用）
+    min_win_w: int = 480
+    min_win_h: int = 120
 
 
 @dataclass
