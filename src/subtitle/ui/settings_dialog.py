@@ -170,6 +170,7 @@ class SettingsDialog(QDialog):
         self.engine_combo = QComboBox()
         self.engine_combo.addItem("本地 FunASR（流式，需GPU）", "funasr")
         self.engine_combo.addItem("本地 SenseVoice（小模型，CPU可跑）", "sensevoice")
+        self.engine_combo.addItem("本地 Whisper（faster-whisper，多语言+翻译）", "faster_whisper")
         self.engine_combo.addItem("阿里云 API（流式，任意平台）", "aliyun")
         self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
         v.addWidget(_row("识别引擎", "选择语音识别后端", self.engine_combo))
@@ -185,6 +186,8 @@ class SettingsDialog(QDialog):
         self.funasr_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
         self.funasr_device_combo.addItem("CPU", "cpu")
         fp.addWidget(_row("FunASR 设备", "推理设备，GPU 更快", self.funasr_device_combo))
+        self.funasr_punc_check = ToggleSwitch()
+        fp.addWidget(_row("流式标点", "补标点以支持自动分行（首次下载~300-700MB，需重启识别生效）", self.funasr_punc_check))
         fp.addStretch(1)
         self.engine_stack.addWidget(funasr_panel)
         # SenseVoice
@@ -229,6 +232,62 @@ class SettingsDialog(QDialog):
         ap.addWidget(hint)
         ap.addStretch(1)
         self.engine_stack.addWidget(aliyun_panel)
+        # faster-whisper（CTranslate2 后端，多语言+翻译，不依赖 torch）
+        fw_panel = QWidget()
+        wp = QVBoxLayout(fw_panel)
+        wp.setContentsMargins(0, 0, 0, 0)
+        wp.setSpacing(4)
+        # try import 守卫：未装时置灰 + 提示
+        try:
+            import faster_whisper  # noqa: F401
+            fw_available = True
+        except ImportError:
+            fw_available = False
+        self.fw_model_combo = QComboBox()
+        for name, label in [("large-v3-turbo", "large-v3-turbo（推荐，快+准）"),
+                            ("large-v3", "large-v3（最准，慢）"),
+                            ("medium", "medium（中等）"),
+                            ("small", "small（最快，弱机器）"),
+                            ("distil-large-v3", "distil-large-v3（仅英文，最快）")]:
+            self.fw_model_combo.addItem(label, name)
+        wp.addWidget(_row("Whisper 模型", "首用从 HF Hub 自动下载", self.fw_model_combo))
+        self.fw_device_combo = QComboBox()
+        self.fw_device_combo.addItem("auto（自动检测，推荐）", "auto")
+        self.fw_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
+        self.fw_device_combo.addItem("CPU", "cpu")
+        wp.addWidget(_row("设备", "auto=有GPU用GPU否则CPU，不崩", self.fw_device_combo))
+        self.fw_compute_combo = QComboBox()
+        for v, label in [("auto", "auto（自动）"),
+                         ("float16", "float16（GPU）"),
+                         ("int8", "int8（CPU 最快）"),
+                         ("int8_float16", "int8_float16（省显存）")]:
+            self.fw_compute_combo.addItem(label, v)
+        wp.addWidget(_row("计算精度", "auto=GPU用float16/CPU用int8", self.fw_compute_combo))
+        self.fw_lang_combo = QComboBox()
+        self.fw_lang_combo.addItem("中文", "zh")
+        self.fw_lang_combo.addItem("自动检测", "auto")
+        self.fw_lang_combo.addItem("英文", "en")
+        self.fw_lang_combo.addItem("日文", "ja")
+        wp.addWidget(_row("语言", "影响识别准确度，中文建议指定", self.fw_lang_combo))
+        self.fw_beam_spin = QSpinBox()
+        self.fw_beam_spin.setRange(1, 10)
+        wp.addWidget(_row("beam_size", "1 最快（turbo 鲁棒），5 默认更准", self.fw_beam_spin))
+        self.fw_seg_spin = QDoubleSpinBox()
+        self.fw_seg_spin.setRange(0.5, 5.0)
+        self.fw_seg_spin.setSingleStep(0.5)
+        self.fw_seg_spin.setSuffix(" 秒")
+        wp.addWidget(_row("攒段时长", "越小延迟越低但易切词", self.fw_seg_spin))
+        if not fw_available:
+            hint_fw = QLabel("⚠️ faster-whisper 未安装。多语言/翻译引擎需要它：\n"
+                             "pip install faster-whisper（不依赖 torch）")
+            hint_fw.setStyleSheet("color: #c77; font-size: 11px;")
+            hint_fw.setWordWrap(True)
+            wp.addWidget(hint_fw)
+            for w in (self.fw_model_combo, self.fw_device_combo, self.fw_compute_combo,
+                      self.fw_lang_combo, self.fw_beam_spin, self.fw_seg_spin):
+                w.setEnabled(False)
+        wp.addStretch(1)
+        self.engine_stack.addWidget(fw_panel)
         v.addWidget(self.engine_stack)
 
         v.addStretch(1)
@@ -415,6 +474,8 @@ class SettingsDialog(QDialog):
         self.maxchars_spin.setSingleStep(1000)
         self.maxchars_spin.setSuffix(" 字符")
         g_sub.add_card(_row("最大字符数", "超出后自动从头清理", self.maxchars_spin))
+        self.line_break_check = ToggleSwitch()
+        g_sub.add_card(_row("自动分行", "识别到句末标点或句子边界时换行", self.line_break_check))
         self.clear_btn = QPushButton("🗑 清空当前字幕")
         self.clear_btn.clicked.connect(self._on_clear_transcript)
         g_sub.add_card(_row("清空字幕", "清除所有已识别文本", self.clear_btn))
@@ -499,12 +560,24 @@ class SettingsDialog(QDialog):
         self._sync_engine_panel()
         self.funasr_device_combo.setCurrentIndex(
             max(0, self.funasr_device_combo.findData(asr.device)))
+        self.funasr_punc_check.setChecked(asr.funasr_punc_enabled)
         self.sv_device_combo.setCurrentIndex(
             max(0, self.sv_device_combo.findData(asr.sensevoice_device)))
         self.sv_segment_spin.setValue(asr.sensevoice_segment_seconds)
         self.aliyun_akid_edit.setText(credentials.get(credentials.KEY_ALIYUN_AK_ID) or "")
         self.aliyun_aksecret_edit.setText(credentials.get(credentials.KEY_ALIYUN_AK_SECRET) or "")
         self.aliyun_appkey_edit.setText(credentials.get(credentials.KEY_ALIYUN_APPKEY) or "")
+        # faster-whisper
+        self.fw_model_combo.setCurrentIndex(
+            max(0, self.fw_model_combo.findData(asr.faster_whisper_model)))
+        self.fw_device_combo.setCurrentIndex(
+            max(0, self.fw_device_combo.findData(asr.faster_whisper_device)))
+        self.fw_compute_combo.setCurrentIndex(
+            max(0, self.fw_compute_combo.findData(asr.faster_whisper_compute_type)))
+        self.fw_lang_combo.setCurrentIndex(
+            max(0, self.fw_lang_combo.findData(asr.faster_whisper_language)))
+        self.fw_beam_spin.setValue(asr.faster_whisper_beam_size)
+        self.fw_seg_spin.setValue(asr.faster_whisper_segment_seconds)
 
         # 外观
         current_theme = self.panel.get_theme()
@@ -532,6 +605,7 @@ class SettingsDialog(QDialog):
         self.close_combo.setCurrentIndex(max(0, self.close_combo.findData(ui.close_action)))
         self.delay_spin.setValue(ui.toolbar_hide_delay_ms)
         self.maxchars_spin.setValue(ui.max_chars)
+        self.line_break_check.setChecked(self.panel.get_line_break())
 
         # 皮肤
         self.skin_enable_check.setChecked(skin.enabled)
@@ -585,7 +659,7 @@ class SettingsDialog(QDialog):
 
     def _sync_engine_panel(self):
         etype = self.engine_combo.currentData()
-        idx = {"funasr": 0, "sensevoice": 1, "aliyun": 2}.get(etype, 0)
+        idx = {"funasr": 0, "sensevoice": 1, "faster_whisper": 2, "aliyun": 3}.get(etype, 0)
         self.engine_stack.setCurrentIndex(idx)
 
     def _update_recog_buttons(self):
@@ -830,6 +904,7 @@ class SettingsDialog(QDialog):
         asr = self.cfg.asr
         asr.engine_type = self.engine_combo.currentData()
         asr.device = self.funasr_device_combo.currentData()
+        asr.funasr_punc_enabled = self.funasr_punc_check.isChecked()
         asr.sensevoice_device = self.sv_device_combo.currentData()
         asr.sensevoice_segment_seconds = self.sv_segment_spin.value()
         # 阿里云 AccessKey ID / Secret / AppKey → 写到系统保险箱（不进 config.yaml）
@@ -838,6 +913,13 @@ class SettingsDialog(QDialog):
             ak_secret=self.aliyun_aksecret_edit.text().strip(),
             appkey=self.aliyun_appkey_edit.text().strip(),
         )
+        # faster-whisper
+        asr.faster_whisper_model = self.fw_model_combo.currentData()
+        asr.faster_whisper_device = self.fw_device_combo.currentData()
+        asr.faster_whisper_compute_type = self.fw_compute_combo.currentData()
+        asr.faster_whisper_language = self.fw_lang_combo.currentData()
+        asr.faster_whisper_beam_size = self.fw_beam_spin.value()
+        asr.faster_whisper_segment_seconds = self.fw_seg_spin.value()
 
         # 外观
         theme_name = self.theme_combo.currentData()
@@ -860,6 +942,7 @@ class SettingsDialog(QDialog):
         p.set_close_action(self.close_combo.currentData())
         p.set_toolbar_hide_delay(self.delay_spin.value())
         p.set_max_chars(self.maxchars_spin.value())
+        p.set_line_break(self.line_break_check.isChecked())
 
         # 皮肤
         skin = self.cfg.skin

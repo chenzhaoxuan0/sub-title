@@ -40,8 +40,10 @@ class AudioConfig:
 
 @dataclass
 class AsrConfig:
-    # 引擎选择：funasr（本地流式）/ sensevoice（本地段式小模型）/ aliyun（阿里云API）
-    engine_type: str = "funasr"
+    # 引擎选择：sensevoice（默认，CPU 友好+自带标点）/ funasr（本地流式，需 GPU 低延迟）/
+    #           faster_whisper（本地 Whisper，多语言+翻译，不依赖 torch）/ aliyun（阿里云API）
+    # 默认 sensevoice：官方单流 CPU 即可实时，Mac/Win 通用；首次启动会按硬件重写此值。
+    engine_type: str = "sensevoice"
 
     # ---- FunASR（paraformer-zh-streaming）----
     model: str = "paraformer-zh-streaming"
@@ -51,6 +53,12 @@ class AsrConfig:
     decoder_chunk_look_back: int = 1
     disable_update: bool = True
     punc_model: str = "ct-punc"
+    # 流式标点后处理（可选）。paraformer-zh-streaming 流式输出本身不带标点，
+    # 开启后用 realtime punc 模型给裸文本增量补标点，让默认引擎也能按句分行。
+    # 首次启动会下载模型（~300-700MB）。改动需停止再开始识别才生效。
+    funasr_punc_enabled: bool = False
+    funasr_punc_model: str = "iic/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727"
+    funasr_punc_device: str = "cpu"   # CT-Transformer 轻量，CPU 即可，避免和 ASR 抢 GPU
 
     # ---- SenseVoice（段式，CPU 可跑）----
     sensevoice_model: str = "iic/SenseVoiceSmall"
@@ -62,6 +70,18 @@ class AsrConfig:
     # 存在系统 keyring 里（Windows Credential Manager / macOS Keychain / Linux libsecret）。
     # region 不是密钥，可以放这里。
     aliyun_region: str = "cn-shanghai"
+
+    # ---- faster-whisper（CTranslate2 后端，段式伪流式，不依赖 torch）----
+    # 价值：多语言（99 语言）+ 翻译 + 轻量分发。中文准确度弱于 FunASR 系列。
+    # 模型首用自动从 HF Hub 下载（large-v3-turbo ~1.5GB）。
+    faster_whisper_model: str = "large-v3-turbo"
+    faster_whisper_device: str = "auto"             # cpu / cuda / auto（auto 自动回退，不崩）
+    faster_whisper_compute_type: str = "auto"       # auto=GPU 用 float16 / CPU 用 int8
+    faster_whisper_language: str = "zh"             # "auto" 或 None = 自动检测
+    faster_whisper_beam_size: int = 1               # 1 降延迟（turbo 在 beam=1 鲁棒）
+    faster_whisper_segment_seconds: float = 2.0     # 复用 SenseVoice 的段式策略
+    faster_whisper_silence_threshold: float = 0.01
+    faster_whisper_vad_filter: bool = False         # 内部 Silero VAD 清理，短段默认关
 
 
 @dataclass
@@ -81,6 +101,9 @@ class UiConfig:
     close_action: str = "ask"
     toolbar_hide_delay_ms: int = 800
     lock_scroll_to_bottom: bool = False
+    # 自动分行：识别到句末标点（。！？!?…）或引擎句子边界（is_final）时换行。
+    # 无标点且无边界的引擎（如 FunASR 未开流式标点）不会强行分行，保持连续文本。
+    line_break_enabled: bool = True
     min_win_w: int = 30
     min_win_h: int = 30
     # 自定义几何（覆盖主题默认值）
