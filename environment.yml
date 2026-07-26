@@ -12,5 +12,5 @@ dependencies:
       - soundfile
       - numpy
       - librosa
-      - PyQt5
+      - PySide6
       - PyYAML
