@@ -97,7 +97,7 @@ class SkinConfig:
     """桌宠/贴图皮肤配置。"""
     enabled: bool = False                    # 是否启用贴图皮肤
     active_skin: str = ""                    # 当前使用的皮肤名称
-    skins_dir: str = "skins"                 # 皮肤存储目录（相对项目根）
+    skins_dir: str = "skins"                 # 皮肤目录；相对路径基于用户数据目录
     editor_grid_snap: bool = True            # 编辑器网格吸附
     editor_grid_size: int = 8                # 网格大小 (px)
     editor_show_guides: bool = True          # 显示辅助线

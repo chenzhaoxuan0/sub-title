@@ -114,6 +114,7 @@ class TrayController(QObject):
     toggle_pin_requested = Signal()
     settings_requested = Signal()
     skin_editor_requested = Signal()
+    skin_selected = Signal(str)
     quit_requested = Signal()
     theme_switch_requested = Signal(str)  # 切换到指定主题
 
@@ -168,7 +169,9 @@ class TrayController(QObject):
         self.act_skin_none = QAction("  无（纯字幕）", self.skin_menu)
         self.act_skin_none.setCheckable(True)
         self.act_skin_none.setChecked(True)
+        self.act_skin_none.triggered.connect(lambda: self.skin_selected.emit(""))
         self.skin_menu.addAction(self.act_skin_none)
+        self._skin_actions: list[QAction] = []
 
         self._menu.addSeparator()
 
@@ -222,6 +225,20 @@ class TrayController(QObject):
         accent = self._theme_mgr.current.colors.accent
         icon_style = "minimal" if IS_MAC else "modern"
         self.tray.setIcon(_make_icon(accent, icon_style))
+
+    def set_skins(self, names: list[str], current: str = ""):
+        for action in self._skin_actions:
+            self.skin_menu.removeAction(action)
+            action.deleteLater()
+        self._skin_actions.clear()
+        self.act_skin_none.setChecked(not current)
+        for name in names:
+            action = QAction(f"  {name}", self.skin_menu)
+            action.setCheckable(True)
+            action.setChecked(name == current)
+            action.triggered.connect(lambda checked=False, value=name: self.skin_selected.emit(value))
+            self.skin_menu.addAction(action)
+            self._skin_actions.append(action)
 
     def _on_activated(self, reason):
         if reason == QSystemTrayIcon.Trigger:

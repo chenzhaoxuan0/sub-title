@@ -29,6 +29,15 @@
   - **设置**：识别引擎选择 + 各引擎配置（设备/凭证）、外观、窗口尺寸、滚动行为、字幕文本上限
   - **文稿回看**：完整字幕文本查看、刷新、复制、清空
 
+### 字幕皮肤 / 桌宠贴图
+- 在字幕文字上方或下方放置透明 PNG/WebP 图层，支持排序、显隐、锁定、旋转、缩放和九宫格锚定
+- 支持 PNG/WebP 序列帧，可设置素材帧率和循环方式
+- 每个动作拥有独立时间轴，支持逐属性关键帧、缓动、框选、多选、复制粘贴、整体拖动和时间缩放
+- 动作支持优先级、可打断、冷却、重复抑制、等待队列以及不同图层并行播放
+- 支持定时、随机、识别状态、字幕、关键词、正则、空闲、音量、窗口显示/隐藏和点击贴图触发
+- 编辑器实时镜像当前字幕窗口；皮肤可导入、导出为包含全部素材的 ZIP 包
+- 托盘右键 → **桌宠皮肤** 可打开编辑器、切换皮肤或恢复纯字幕
+
 ### 滚动控制
 - 智能自动滚动：贴底时跟随最新，向上翻看时不被打断
 - 「锁定滚动到底部」开关：强制始终跟随
@@ -197,7 +206,16 @@ ui:
   always_on_top: true
   close_action: ask          # ask / hide / quit
   lock_scroll_to_bottom: false
+
+skin:
+  enabled: false             # 启动时是否加载皮肤
+  active_skin: ''            # 当前皮肤目录名
+  skins_dir: skins           # 相对用户数据目录，也可填绝对路径
+  editor_grid_snap: true
+  editor_grid_size: 8
 ```
+
+皮肤保存后会立即设为当前皮肤。默认皮肤目录位于用户数据目录下的 `skins/`。
 
 ## 项目结构
 
@@ -218,6 +236,14 @@ sub-title/
 │   │   ├── funasr_engine.py # FunASR 流式
 │   │   ├── sensevoice_engine.py  # SenseVoice 段式伪流式
 │   │   └── aliyun_engine.py # 阿里云 NLS API 流式（凭证从 keyring 读）
+│   ├── skin/
+│   │   ├── model.py         # 图层、动作、关键帧、触发器与版本迁移
+│   │   ├── renderer.py      # 双层响应式渲染、序列帧和命中检测
+│   │   ├── action_player.py # 动作优先级、并行、打断与等待队列
+│   │   ├── events.py        # 定时/字幕/音量/窗口/点击事件
+│   │   ├── runtime.py       # 应用级皮肤运行时
+│   │   ├── package.py       # ZIP 皮肤包导入导出与安全检查
+│   │   └── editor.py        # 可视化皮肤编辑器
 │   └── ui/
 │       ├── subtitle_panel.py    # 沉浸式无边框字幕窗口
 │       ├── settings_dialog.py   # 全功能设置对话框

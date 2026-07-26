@@ -1,0 +1,54 @@
+audio:
+  target_sample_rate: 16000
+  chunk_seconds: 0.6
+  input_device: null
+asr:
+  engine_type: funasr
+  model: paraformer-zh-streaming
+  device: cuda
+  chunk_size:
+  - 0
+  - 10
+  - 5
+  encoder_chunk_look_back: 4
+  decoder_chunk_look_back: 1
+  disable_update: true
+  punc_model: ct-punc
+  sensevoice_model: iic/SenseVoiceSmall
+  sensevoice_device: cpu
+  sensevoice_segment_seconds: 2.0
+  aliyun_access_key_id: ''
+  aliyun_access_key_secret: ''
+  aliyun_appkey: ''
+  aliyun_region: cn-shanghai
+ui:
+  font_family: MiSans VF Normal
+  font_size: 22
+  window_opacity: 0.87
+  max_chars: 20000
+  theme: pink
+  always_on_top: true
+  win_x: 1011
+  win_y: 1095
+  win_w: 480
+  win_h: 120
+  close_action: ask
+  toolbar_hide_delay_ms: 800
+  lock_scroll_to_bottom: true
+  min_win_w: 480
+  min_win_h: 120
+  border_radius: 16
+  padding_top: 8
+  padding_bottom: 8
+  padding_left: 16
+  padding_right: 16
+  line_spacing: 1.4
+skin:
+  enabled: true
+  active_skin: ''
+  skins_dir: skins
+  editor_grid_snap: true
+  editor_grid_size: 8
+  editor_show_guides: true
+  animation_fps: 30
+  animation_loop: true

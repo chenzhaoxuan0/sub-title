@@ -1,37 +1,25 @@
-"""事件触发系统 —— 管理触发器的定时/事件驱动逻辑。
-
-触发器类型：
-- TIMER: 固定间隔触发
-- ON_START: 识别开始时触发
-- ON_STOP: 识别停止时触发
-- ON_TEXT: 新字幕到达时触发
-- ON_FINAL: 一句话结束时触发
-- ON_IDLE: 空闲超时后触发
-- RANDOM: 随机间隔触发
-"""
+"""Timer and application-event triggers for skin animation clips."""
 from __future__ import annotations
 
 import random
 import time
-from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from .model import SkinDefinition, Trigger, TriggerType, AnimationAction
+from .model import SkinDefinition, Trigger, TriggerType
 
 
 class TriggerManager(QObject):
-    """触发器管理器：监听事件、管理定时器、触发动作播放。"""
-
-    # 动作触发信号：(action_name, layer_overrides)
-    action_triggered = Signal(str)
+    action_triggered = Signal(str, object, bool)
 
     def __init__(self, skin: SkinDefinition, parent=None):
         super().__init__(parent)
         self._skin = skin
         self._timers: dict[str, QTimer] = {}
-        self._last_text_time: float = 0.0
-        self._idle_timer: Optional[QTimer] = None
+        self._last_text_time = time.monotonic()
+        self._last_fire: dict[str, float] = {}
+        self._fire_counts: dict[str, int] = {}
+        self._volume_since: dict[str, float] = {}
         self._active = False
 
     @property
@@ -39,102 +27,169 @@ class TriggerManager(QObject):
         return self._skin
 
     @skin.setter
-    def skin(self, value: SkinDefinition):
+    def skin(self, value: SkinDefinition) -> None:
+        was_active = self._active
         self.stop()
         self._skin = value
+        if was_active:
+            self.start()
 
-    def start(self):
-        """启动所有触发器。"""
+    def start(self) -> None:
+        self.stop()
         self._active = True
-        self._last_text_time = time.time()
-
+        self._last_text_time = time.monotonic()
         for trigger in self._skin.triggers:
-            if not trigger.enabled:
-                continue
-            self._setup_trigger(trigger)
+            if trigger.enabled:
+                self._setup_trigger(trigger)
 
-    def stop(self):
-        """停止所有触发器。"""
+    def stop(self) -> None:
         self._active = False
         for timer in self._timers.values():
             timer.stop()
+            timer.deleteLater()
         self._timers.clear()
-        if self._idle_timer:
-            self._idle_timer.stop()
-            self._idle_timer = None
+        self._volume_since.clear()
 
-    def _setup_trigger(self, trigger: Trigger):
-        """为单个触发器设置定时器。"""
+    def refresh(self) -> None:
+        if self._active:
+            self.start()
+
+    def fire_for_test(self, trigger_id: str) -> bool:
+        trigger = next((item for item in self._skin.triggers if item.id == trigger_id), None)
+        return self._fire(trigger, bypass_limits=True) if trigger else False
+
+    def _setup_trigger(self, trigger: Trigger) -> None:
         if trigger.trigger_type == TriggerType.TIMER:
             timer = QTimer(self)
-            timer.setInterval(int(trigger.interval * 1000))
-            timer.timeout.connect(lambda t=trigger: self._fire(t))
-            # 首次延迟
-            if trigger.delay > 0:
-                QTimer.singleShot(int(trigger.delay * 1000), timer.start)
+            timer.setInterval(max(50, int(trigger.interval * 1000)))
+            timer.timeout.connect(lambda current=trigger: self._fire(current))
+            self._timers[trigger.id] = timer
+            if trigger.delay:
+                QTimer.singleShot(int(trigger.delay * 1000), lambda: self._start_timer(trigger.id))
             else:
                 timer.start()
-            self._timers[trigger.id] = timer
-
         elif trigger.trigger_type == TriggerType.RANDOM:
             self._schedule_random(trigger)
-
         elif trigger.trigger_type == TriggerType.ON_IDLE:
-            self._idle_timer = QTimer(self)
-            self._idle_timer.setInterval(1000)  # 每秒检查
-            self._idle_timer.timeout.connect(lambda t=trigger: self._check_idle(t))
-            self._idle_timer.start()
-            self._timers[trigger.id] = self._idle_timer
+            timer = QTimer(self)
+            timer.setInterval(250)
+            timer.timeout.connect(lambda current=trigger: self._check_idle(current))
+            timer.start()
+            self._timers[trigger.id] = timer
 
-    def _schedule_random(self, trigger: Trigger):
-        """随机间隔触发：每次触发后重新调度下一次。"""
-        interval = random.uniform(trigger.random_min, trigger.random_max)
+    def _start_timer(self, trigger_id: str) -> None:
+        if self._active and trigger_id in self._timers:
+            self._timers[trigger_id].start()
+
+    def _schedule_random(self, trigger: Trigger) -> None:
+        if not self._active:
+            return
+        low, high = sorted((trigger.random_min, trigger.random_max))
         timer = QTimer(self)
         timer.setSingleShot(True)
-        timer.setInterval(int(interval * 1000))
-        timer.timeout.connect(lambda: self._on_random_fire(trigger))
+        timer.setInterval(max(50, int(random.uniform(low, high) * 1000)))
+        timer.timeout.connect(lambda current=trigger: self._random_fired(current))
         timer.start()
+        old = self._timers.pop(trigger.id, None)
+        if old is not None:
+            old.deleteLater()
         self._timers[trigger.id] = timer
 
-    def _on_random_fire(self, trigger: Trigger):
-        """随机触发器触发后重新调度。"""
+    def _random_fired(self, trigger: Trigger) -> None:
         self._fire(trigger)
         if self._active and trigger.enabled:
             self._schedule_random(trigger)
 
-    def _check_idle(self, trigger: Trigger):
-        """检查是否空闲超时。"""
-        elapsed = time.time() - self._last_text_time
-        if elapsed >= trigger.idle_timeout:
+    def _check_idle(self, trigger: Trigger) -> None:
+        if time.monotonic() - self._last_text_time >= trigger.idle_timeout:
+            if self._fire(trigger):
+                self._last_text_time = time.monotonic()
+
+    def _fire(self, trigger: Trigger, bypass_limits: bool = False) -> bool:
+        if not trigger.enabled or not trigger.action_id:
+            return False
+        now = time.monotonic()
+        if not bypass_limits:
+            if trigger.max_fires and self._fire_counts.get(trigger.id, 0) >= trigger.max_fires:
+                return False
+            if now - self._last_fire.get(trigger.id, float("-inf")) < trigger.cooldown:
+                return False
+            if random.random() > trigger.probability:
+                return False
+        self._last_fire[trigger.id] = now
+        self._fire_counts[trigger.id] = self._fire_counts.get(trigger.id, 0) + 1
+        self.action_triggered.emit(
+            trigger.action_id, trigger.priority_override, trigger.allow_retrigger
+        )
+        return True
+
+    def _for_type(self, trigger_type: TriggerType):
+        return (
+            trigger
+            for trigger in self._skin.triggers
+            if trigger.enabled and trigger.trigger_type == trigger_type
+        )
+
+    def on_recognition_start(self) -> None:
+        self._last_text_time = time.monotonic()
+        for trigger in self._for_type(TriggerType.ON_START):
             self._fire(trigger)
-            self._last_text_time = time.time()  # 重置，避免连续触发
 
-    def _fire(self, trigger: Trigger):
-        """触发一个动作。"""
-        if trigger.action_name:
-            self.action_triggered.emit(trigger.action_name)
+    def on_recognition_stop(self) -> None:
+        for trigger in self._for_type(TriggerType.ON_STOP):
+            self._fire(trigger)
 
-    # ---------- 外部事件输入 ----------
-    def on_recognition_start(self):
-        """识别开始事件。"""
-        self._last_text_time = time.time()
+    def on_text_received(self, text: str = "", is_final: bool = False) -> None:
+        self._last_text_time = time.monotonic()
+        text_types = {
+            TriggerType.ON_TEXT,
+            TriggerType.ON_PARTIAL,
+            TriggerType.ON_FINAL,
+            TriggerType.KEYWORD,
+            TriggerType.REGEX,
+        }
         for trigger in self._skin.triggers:
-            if trigger.enabled and trigger.trigger_type == TriggerType.ON_START:
+            if trigger.enabled and trigger.trigger_type in text_types and trigger.matches_text(text, is_final):
                 self._fire(trigger)
 
-    def on_recognition_stop(self):
-        """识别停止事件。"""
+    def on_audio_level(self, rms: float, peak: float = 0.0) -> None:
+        del peak
+        now = time.monotonic()
         for trigger in self._skin.triggers:
-            if trigger.enabled and trigger.trigger_type == TriggerType.ON_STOP:
-                self._fire(trigger)
-
-    def on_text_received(self, is_final: bool = False):
-        """新字幕文本到达。"""
-        self._last_text_time = time.time()
-        for trigger in self._skin.triggers:
-            if not trigger.enabled:
+            if not trigger.enabled or trigger.trigger_type not in (
+                TriggerType.VOLUME_ABOVE,
+                TriggerType.VOLUME_BELOW,
+            ):
                 continue
-            if trigger.trigger_type == TriggerType.ON_TEXT:
+            matched = (
+                rms >= trigger.volume_threshold
+                if trigger.trigger_type == TriggerType.VOLUME_ABOVE
+                else rms <= trigger.volume_threshold
+            )
+            if not matched:
+                self._volume_since.pop(trigger.id, None)
+                continue
+            started = self._volume_since.setdefault(trigger.id, now)
+            if now - started >= trigger.hold_seconds and self._fire(trigger):
+                self._volume_since[trigger.id] = now
+
+    def on_window_shown(self) -> None:
+        for trigger in self._for_type(TriggerType.WINDOW_SHOW):
+            self._fire(trigger)
+
+    def on_window_hidden(self) -> None:
+        for trigger in self._for_type(TriggerType.WINDOW_HIDE):
+            self._fire(trigger)
+
+    def on_layer_clicked(self, layer_id: str, mouse_button: str = "left") -> None:
+        for trigger in self._for_type(TriggerType.ON_CLICK):
+            if trigger.mouse_button == mouse_button and (
+                not trigger.target_layer_id or trigger.target_layer_id == layer_id
+            ):
                 self._fire(trigger)
-            elif trigger.trigger_type == TriggerType.ON_FINAL and is_final:
-                self._fire(trigger)
+
+    def has_click_triggers(self) -> bool:
+        return any(
+            trigger.enabled and trigger.trigger_type == TriggerType.ON_CLICK
+            for trigger in self._skin.triggers
+        )

@@ -48,7 +48,7 @@ ui:
 skin:
   enabled: false
   active_skin: ''
-  skins_dir: skins
+  skins_dir: skins               # 相对用户数据目录，也可以填写绝对路径
   editor_grid_snap: true
   editor_grid_size: 8
   editor_show_guides: true

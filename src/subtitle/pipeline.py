@@ -38,14 +38,17 @@ class SubtitlePipeline:
         engine: AsrEngine,
         on_text: Optional[Callable[[str, bool], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
+        on_audio_level: Optional[Callable[[float, float], None]] = None,
     ):
         self.cfg = cfg
         self.engine = engine
         self.on_text = on_text or (lambda t, f: print(t, end="", flush=True))
         self.on_error = on_error or (lambda m: print(f"[pipeline] {m}"))
+        self.on_audio_level = on_audio_level or (lambda rms, peak: None)
 
         self.target_sr = cfg.audio.target_sample_rate
         self.chunk_samples = int(round(cfg.audio.chunk_seconds * self.target_sr))
+        self.capture_block_samples = min(self.chunk_samples, max(1, self.target_sr // 10))
 
         self._capture: Optional[SystemAudioCapture] = None
         self._infer_thread: Optional[threading.Thread] = None
@@ -61,7 +64,7 @@ class SubtitlePipeline:
         # 2) 启动采集（soundcard recorder 已重采样到 target_sr/mono）
         self._capture = SystemAudioCapture(
             target_sr=self.target_sr,
-            block_samples=self.chunk_samples,
+            block_samples=self.capture_block_samples,
             speaker_name=self.cfg.audio.input_device,
         )
         self._capture.start()
@@ -122,6 +125,10 @@ class SubtitlePipeline:
                     break
                 # 归一化到 16k mono float32
                 chunk = normalize_pcm(raw, src_sr=src_sr, dst_sr=self.target_sr)
+                if len(chunk):
+                    rms = float(np.sqrt(np.mean(np.square(chunk), dtype=np.float64)))
+                    peak = float(np.max(np.abs(chunk)))
+                    self.on_audio_level(rms, peak)
                 self._buf = np.concatenate([self._buf, chunk])
                 # 按固定长度切块喂引擎
                 while len(self._buf) >= self.chunk_samples and self._running.is_set():

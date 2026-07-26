@@ -83,6 +83,7 @@ class _PipelineWorker(QObject):
     started = Signal()
     failed = Signal(str)
     text = Signal(str, bool)
+    audio_level = Signal(float, float)
 
     def __init__(self, cfg, device_name):
         super().__init__()
@@ -101,6 +102,7 @@ class _PipelineWorker(QObject):
             self.pipeline = SubtitlePipeline(
                 self.cfg, self.engine,
                 on_text=lambda t, f: self.text.emit(t, f),
+                on_audio_level=lambda rms, peak: self.audio_level.emit(rms, peak),
             )
             self.pipeline.start()
             self.started.emit()
@@ -136,6 +138,8 @@ class SubtitleApp:
             on_quit=None,
             on_geometry_changed=self._on_geometry_changed,
         )
+        from .skin.runtime import SkinRuntime
+        self.skin_runtime = SkinRuntime(self.panel)
 
         # 托盘
         self.tray = TrayController()
@@ -148,6 +152,7 @@ class SubtitleApp:
         self.tray.quit_requested.connect(self._quit)
         self.tray.theme_switch_requested.connect(self._on_theme_switch)
         self.tray.skin_editor_requested.connect(self._open_skin_editor)
+        self.tray.skin_selected.connect(self._on_skin_selected)
 
         # 主题切换时刷新托盘
         self.panel.theme_changed.connect(self._on_panel_theme_changed)
@@ -167,6 +172,9 @@ class SubtitleApp:
         self._starting = False        # _start 防重入标志
         self._quitting = False        # 退出流程进行中（避免重复）
         self._settings_dlg: SettingsDialog | None = None  # 非模态：单例
+        self._skin_editor = None
+        self._load_active_skin()
+        self._refresh_skin_menu()
 
     # ---------- 主题 ----------
     def _on_theme_switch(self, name: str):
@@ -191,6 +199,8 @@ class SubtitleApp:
             self._worker.started.connect(self._on_started)
             self._worker.failed.connect(self._on_failed)
             self._worker.text.connect(lambda t, f: self.panel.emit_text(t, f))
+            self._worker.text.connect(self.skin_runtime.on_text)
+            self._worker.audio_level.connect(self.skin_runtime.on_audio_level)
             self._thread.start()
         finally:
             self._starting = False
@@ -199,6 +209,7 @@ class SubtitleApp:
         self.panel.set_status("运行中 · 实时识别")
         self.tray.set_running(True)
         self.tray.notify("sub-title", "已开始实时识别")
+        self.skin_runtime.on_recognition_start()
 
     def _on_failed(self, msg: str):
         self.panel.set_status(f"出错：{msg}")
@@ -207,11 +218,14 @@ class SubtitleApp:
         self._cleanup_thread()
 
     def _stop(self):
+        was_running = self._worker is not None
         if self._worker is not None:
             self._worker.stop()    # pipeline.stop：发哨兵 + join 推理线程（推理线程内 engine.stop）
         self._cleanup_thread()
         self.panel.set_status("已停止")
         self.tray.set_running(False)
+        if was_running:
+            self.skin_runtime.on_recognition_stop()
 
     def _cleanup_thread(self):
         if self._thread is not None:
@@ -221,6 +235,7 @@ class SubtitleApp:
                     self._worker.started.disconnect()
                     self._worker.failed.disconnect()
                     self._worker.text.disconnect()
+                    self._worker.audio_level.disconnect()
                 except Exception:
                     pass
             self._thread.quit()
@@ -285,11 +300,65 @@ class SubtitleApp:
         self._settings_dlg = None
 
     # ---------- 皮肤编辑器 ----------
+    def _load_active_skin(self):
+        if not self.cfg.skin.active_skin:
+            self.cfg.skin.enabled = False
+            return
+        if not self.cfg.skin.enabled:
+            return
+        try:
+            from .skin.package import skins_root
+            directory = skins_root(self.cfg.skin.skins_dir) / self.cfg.skin.active_skin
+            self.skin_runtime.load_directory(directory)
+        except Exception as e:
+            self.cfg.skin.enabled = False
+            self.panel.set_status(f"皮肤加载失败，已禁用: {e}")
+
+    def apply_skin_directory(self, directory: Path):
+        self.skin_runtime.load_directory(directory)
+        self.cfg.skin.enabled = True
+        self.cfg.skin.active_skin = directory.name
+        self._save_config()
+        self._refresh_skin_menu()
+
+    def _refresh_skin_menu(self):
+        try:
+            from .skin.package import list_skin_directories, skins_root
+            root = skins_root(self.cfg.skin.skins_dir)
+            self.tray.set_skins(
+                [directory.name for directory in list_skin_directories(root)],
+                self.cfg.skin.active_skin if self.cfg.skin.enabled else "",
+            )
+        except Exception as e:
+            print(f"[skin] 刷新皮肤菜单失败: {e}")
+
+    def _on_skin_selected(self, name: str):
+        if not name:
+            self.skin_runtime.disable()
+            self.cfg.skin.enabled = False
+            self.cfg.skin.active_skin = ""
+            self._save_config()
+            self._refresh_skin_menu()
+            return
+        try:
+            from .skin.package import skins_root
+            self.apply_skin_directory(skins_root(self.cfg.skin.skins_dir) / name)
+        except Exception as e:
+            self.panel.set_status(f"切换皮肤失败: {e}")
+
     def _open_skin_editor(self):
         """打开桌宠皮肤编辑器。"""
         try:
             from .skin.editor import SkinEditorWindow
-            editor = SkinEditorWindow(self.cfg, self.panel)
+            if self._skin_editor is not None and self._skin_editor.isVisible():
+                self._skin_editor.raise_()
+                self._skin_editor.activateWindow()
+                return
+            editor = SkinEditorWindow(self.cfg, self.panel, runtime=self.skin_runtime)
+            editor.setAttribute(Qt.WA_DeleteOnClose, True)
+            editor.skin_saved.connect(lambda value: self.apply_skin_directory(Path(value)))
+            editor.destroyed.connect(lambda: setattr(self, "_skin_editor", None))
+            self._skin_editor = editor
             editor.show()
         except ImportError as e:
             self.panel.set_status(f"皮肤编辑器加载失败: {e}")
@@ -307,6 +376,7 @@ class SubtitleApp:
             self._stop()
         except Exception as e:
             print(f"[app] 退出时 _stop 异常: {e}")
+        self.skin_runtime.disable()
         self._save_config()
         self.tray.tray.hide()
         self.app.quit()

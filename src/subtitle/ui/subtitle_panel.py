@@ -18,7 +18,7 @@ v4 新增：
 from __future__ import annotations
 
 import platform
-from PySide6.QtCore import Qt, QPoint, QTimer, Signal, QEvent
+from PySide6.QtCore import Qt, QPoint, QPointF, QTimer, Signal, QEvent
 from PySide6.QtGui import QFont, QTextCursor, QMouseEvent, QPainter, QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton,
@@ -77,11 +77,18 @@ class OverlayLayer(QWidget):
 
     透明覆盖在字幕区上方，由 SkinRenderer 驱动绘制。
     """
-    def __init__(self, parent=None):
+    def __init__(self, plane, parent=None):
         super().__init__(parent)
+        self.plane = plane
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self._renderer = None  # SkinRenderer 实例，由外部注入
+        self._runtime = None
+        self._renderer = None
+
+    def set_runtime(self, runtime):
+        self._runtime = runtime
+        self._renderer = runtime.renderer if runtime is not None else None
+        self.update()
 
     def set_renderer(self, renderer):
         self._renderer = renderer
@@ -91,7 +98,7 @@ class OverlayLayer(QWidget):
             painter = QPainter(self)
             painter.setRenderHint(QPainter.Antialiasing)
             painter.setRenderHint(QPainter.SmoothPixmapTransform)
-            self._renderer.render(painter, self.width(), self.height())
+            self._renderer.render(painter, self.width(), self.height(), self.plane)
             painter.end()
 
 
@@ -103,6 +110,8 @@ class SubtitlePanel(QWidget):
     quit_requested = Signal()
     theme_changed = Signal(str)  # 主题切换信号
     context_menu_requested = Signal(QPoint)  # 全局坐标；右键任意位置时发出
+    skin_clicked = Signal(str, str)
+    preview_state_changed = Signal()
 
     def __init__(self, ui_cfg: UiConfig, on_start=None, on_stop=None, on_quit=None,
                  on_geometry_changed=None):
@@ -117,6 +126,8 @@ class SubtitlePanel(QWidget):
         self._text_appended.connect(self._on_text_appended)
         self._drag_offset: QPoint | None = None
         self._font_size = ui_cfg.font_size or 22
+        self._skin_runtime = None
+        self._grabbing_skin_background = False
 
         # 应用配置中的主题
         theme_name = ui_cfg.theme or "Dark"
@@ -162,9 +173,9 @@ class SubtitlePanel(QWidget):
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
 
-        # 贴图叠加层（桌宠皮肤）
-        self.overlay_layer = OverlayLayer(self.container)
-        self.overlay_layer.setObjectName("overlay")
+        # 字幕下层贴图：背景框、身体等装饰。
+        self.underlay_layer = OverlayLayer("below_text", self.container)
+        self.underlay_layer.setObjectName("skin_underlay")
 
         # 字幕文本区
         self.view = _SubtitleView(self.container)
@@ -173,6 +184,10 @@ class SubtitlePanel(QWidget):
         font_family = self.ui_cfg.font_family or geo.font_family
         self.view.setFont(QFont(font_family, self._font_size))
         self.view.setPlaceholderText("点击 ▶ 开始，播放任意视频/音频，字幕会实时出现……")
+
+        # 字幕上层贴图：耳朵、尾巴和前景装饰。
+        self.overlay_layer = OverlayLayer("above_text", self.container)
+        self.overlay_layer.setObjectName("skin_overlay")
 
         # ---- 工具栏 ----
         self.toolbar = QWidget(self)
@@ -277,6 +292,11 @@ class SubtitlePanel(QWidget):
 
         # 组装 container —— 只有 view，撑满整个高度
         container_layout.addWidget(self.view, 1)
+        self.underlay_layer.lower()
+        self.view.raise_()
+        self.overlay_layer.raise_()
+        self.status_label.raise_()
+        self.grip.raise_()
         # status_label + grip 在 _layout_window 里绝对定位（不 add 到 layout）
 
         # 初始隐藏
@@ -325,13 +345,32 @@ class SubtitlePanel(QWidget):
 
     def eventFilter(self, obj, event):
         """子控件的右键 → 转发为 context_menu_requested。"""
-        if (obj in getattr(self, "_filtered_children", ())
-                and event.type() == QEvent.MouseButtonPress
-                and event.button() == Qt.RightButton):
-            # event.pos() 是 child 局部坐标；mapToGlobal 转到屏幕坐标
-            self.context_menu_requested.emit(obj.mapToGlobal(event.pos()))
-            return True  # 消费掉，不再传给 child
+        if obj in getattr(self, "_filtered_children", ()) and event.type() == QEvent.MouseButtonPress:
+            panel_pos = self.mapFromGlobal(obj.mapToGlobal(event.pos()))
+            self._dispatch_skin_click(panel_pos, event.button())
+            if event.button() == Qt.RightButton:
+                self.context_menu_requested.emit(obj.mapToGlobal(event.pos()))
+                return True
         return super().eventFilter(obj, event)
+
+    def _dispatch_skin_click(self, panel_pos: QPoint, button) -> None:
+        if not self._skin_runtime or not self._skin_runtime.has_click_triggers():
+            return
+        button_names = {
+            Qt.LeftButton: "left", Qt.RightButton: "right", Qt.MiddleButton: "middle",
+        }
+        button_name = button_names.get(button)
+        if not button_name:
+            return
+        local = self.container.mapFrom(self, panel_pos)
+        if not self.container.rect().contains(local):
+            return
+        layer = self._skin_runtime.hit_test(
+            QPointF(local), self.container.width(), self.container.height()
+        )
+        if layer is not None:
+            self.skin_clicked.emit(layer.id, button_name)
+            self._skin_runtime.on_layer_clicked(layer.id, button_name)
 
     @staticmethod
     def _pos_on_any_screen(x: int, y: int) -> bool:
@@ -490,6 +529,7 @@ class SubtitlePanel(QWidget):
             self.ui_cfg.theme = name
             self.theme_changed.emit(name)
             self._notify_geometry()
+            self.preview_state_changed.emit()
 
     def set_theme_obj(self, theme: Theme):
         """直接应用 Theme 对象（用于实时预览）。"""
@@ -508,6 +548,8 @@ class SubtitlePanel(QWidget):
         self.ui_cfg.font_family = font.family()
         self._apply_font()
         self._notify_geometry()
+        if not self._grabbing_skin_background:
+            self.preview_state_changed.emit()
 
     def _change_font_size(self, delta: int):
         # 最小 4，与全局设置里 font_size_spin 的下界对齐（之前是 12）
@@ -515,6 +557,7 @@ class SubtitlePanel(QWidget):
         self._apply_font()
         self.ui_cfg.font_size = self._font_size
         self._notify_geometry()
+        self.preview_state_changed.emit()
 
     # ---------- 透明度 ----------
     def _on_opacity_changed(self, value: int):
@@ -557,6 +600,8 @@ class SubtitlePanel(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.show()
         self._apply_theme()
+        if not self._grabbing_skin_background:
+            self.preview_state_changed.emit()
         self.pin_btn.setText("📌 已置顶" if pinned else "📌 未置顶")
         self.ui_cfg.always_on_top = pinned
         self._notify_geometry()
@@ -600,6 +645,7 @@ class SubtitlePanel(QWidget):
 
     # ---------- 拖动 ----------
     def mousePressEvent(self, e: QMouseEvent):
+        self._dispatch_skin_click(e.pos(), e.button())
         if e.button() == Qt.LeftButton:
             self._drag_offset = e.globalPos() - self.frameGeometry().topLeft()
 
@@ -627,8 +673,11 @@ class SubtitlePanel(QWidget):
             self._content_h = new_content_h
         self._layout_window()
         self._update_toolbar_compact()
-        # 同步 overlay 尺寸
+        # 同步皮肤层尺寸
+        self.underlay_layer.setGeometry(self.container.rect())
         self.overlay_layer.setGeometry(self.container.rect())
+        if not self._grabbing_skin_background:
+            self.preview_state_changed.emit()
         self._notify_geometry()
 
     def _layout_window(self):
@@ -660,7 +709,8 @@ class SubtitlePanel(QWidget):
             self.toolbar.setGeometry(0, 0, content_w, tb_h)
             self.toolbar.raise_()
             self.container.setGeometry(0, tb_h, content_w, content_h)
-            # overlay 跟随 container
+            # 皮肤层跟随 container
+            self.underlay_layer.setGeometry(0, 0, content_w, content_h)
             self.overlay_layer.setGeometry(0, 0, content_w, content_h)
             # 状态栏 + 缩放手柄：浮在 container 底部（不占 view 空间）
             self._layout_bottom_overlay(content_w, content_h)
@@ -741,6 +791,8 @@ class SubtitlePanel(QWidget):
         self._pending_text = ""
         self._pending_has_final = False
         self._insert_text(text)
+        if not self._grabbing_skin_background:
+            self.preview_state_changed.emit()
 
     def set_status(self, text: str, color: str | None = None):
         self.status_label.setText(text)
@@ -843,7 +895,18 @@ class SubtitlePanel(QWidget):
 
     def _do_hide(self):
         self._notify_geometry()
+        self.hide()
         self.hide_requested.emit()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._skin_runtime:
+            self._skin_runtime.on_window_shown()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if self._skin_runtime:
+            self._skin_runtime.on_window_hidden()
 
     def toggle_visibility(self):
         if self.isVisible():
@@ -881,6 +944,31 @@ class SubtitlePanel(QWidget):
     def get_window_size(self):
         return self.container.width(), self.container.height()
 
+    def set_skin_runtime(self, runtime):
+        self._skin_runtime = runtime
+        self.underlay_layer.set_runtime(runtime)
+        self.overlay_layer.set_runtime(runtime)
+        self.update_skin_layers()
+
+    def update_skin_layers(self):
+        self.underlay_layer.update()
+        self.overlay_layer.update()
+
+    def grab_skin_background(self):
+        if self._grabbing_skin_background:
+            return self.container.grab()
+        self._grabbing_skin_background = True
+        underlay_visible = self.underlay_layer.isVisible()
+        overlay_visible = self.overlay_layer.isVisible()
+        try:
+            self.underlay_layer.hide()
+            self.overlay_layer.hide()
+            return self.container.grab()
+        finally:
+            self.underlay_layer.setVisible(underlay_visible)
+            self.overlay_layer.setVisible(overlay_visible)
+            self._grabbing_skin_background = False
+
     def get_lock_scroll(self) -> bool:
         return getattr(self.ui_cfg, "lock_scroll_to_bottom", False)
 
@@ -906,12 +994,14 @@ class SubtitlePanel(QWidget):
         self.font_combo.blockSignals(True)
         self.font_combo.setCurrentFont(QFont(name))
         self.font_combo.blockSignals(False)
+        self.preview_state_changed.emit()
 
     def set_font_size(self, size: int):
         # 最小 4，与工具栏 A-/A+ 按钮的下界对齐
         self._font_size = max(4, min(72, int(size)))
         self.ui_cfg.font_size = self._font_size
         self._apply_font()
+        self.preview_state_changed.emit()
 
     def set_opacity(self, value: int):
         value = max(0, min(100, int(value)))
@@ -923,6 +1013,7 @@ class SubtitlePanel(QWidget):
         self.opacity_slider.blockSignals(False)
         self.opacity_spin.blockSignals(False)
         self._apply_theme()
+        self.preview_state_changed.emit()
 
     def set_pin(self, pinned: bool):
         if self.get_pin() != pinned:

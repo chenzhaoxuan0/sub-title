@@ -1,5 +1,6 @@
 # 测试音频/视频文件（含版权内容，绝不提交）
-test/
+test/*
+!test/test_*.py
 captured.wav
 *.wav
 *.mp3
