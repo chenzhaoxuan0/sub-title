@@ -52,7 +52,7 @@
 ### 2. 创建环境 + 安装依赖
 双击项目里的 `scripts/setup_env.bat`，它会自动：
 - 创建 conda 环境 `subtitle`（Python 3.11）
-- 安装 funasr / soundcard / PyQt5 等依赖
+- 安装 funasr / soundcard / PySide6 等依赖
 - 安装 torch CUDA 12.1 版（约 2.5GB）
 
 或手动执行：
@@ -221,11 +221,20 @@ conda init powershell
 
 - **ASR**：[FunASR](https://github.com/modelscope/FunASR) / [SenseVoice](https://github.com/FunAudioLLM/SenseVoice) / 阿里云 NLS
 - **音频捕获**：[soundcard](https://github.com/bastibe/SoundCard)（WASAPI loopback）
-- **UI**：[PyQt5](https://www.riverbankcomputing.com/software/pyqt/)
+- **UI**：[PySide6](https://www.qt.io/qt-for-python)（Qt 官方 Python 绑定，LGPLv3）；Fluent 风格设置 UI 为手写 QSS，未使用第三方 Fluent 组件库
 - **推理**：[PyTorch](https://pytorch.org/)（CUDA 12.1）
 
 ## License
 
-MIT License。详见 [LICENSE](LICENSE)。
+本项目自研源代码以 **MIT License** 开源，详见 [LICENSE](LICENSE)。
+
+第三方依赖的许可证：
+- **PySide6 / Qt**：LGPLv3。本项目动态链接 PySide6（不静态链接），用户可自行替换/重新链接 Qt 库。Qt 源码获取：https://www.qt.io
+- **FunASR / SenseVoice**（阿里达摩院）：Apache 2.0
+- **soundcard**：BSD-3-Clause
+
+> 为何不用 PyQt5：PyQt5 是 GPLv3/商业双协议，会通过链接传染要求整个项目也 GPLv3。改用 PySide6（LGPLv3）后，MIT 项目可安全链接而不被传染。
+>
+> 为何不用 PyQt-Fluent-Widgets：该库为 GPLv3，免费版会传染本项目。设置 UI 的 Fluent 风格采用手写 QSS 实现（见 `src/subtitle/ui/fluent_widgets.py`），无第三方库依赖。
 
 本仓库不包含任何模型权重（模型由 funasr 在首次运行时从 ModelScope 自动下载）。

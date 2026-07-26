@@ -1,11 +1,8 @@
-"""全功能设置对话框 v2 —— 现代化多标签页 + 颜色选择器 + 主题管理。
+"""全局设置对话框（Fluent 风格，手写 QSS，无第三方库）。
 
-标签页：
-  1. 识别 — 引擎选择 + 设备 + 参数
-  2. 外观 — 主题选择/自定义颜色/几何参数
-  3. 行为 — 窗口行为 + 工具栏 + 字幕
-  4. 皮肤 — 桌宠贴图皮肤管理
-  5. 文稿 — 文稿回看
+用 SettingCard/SettingCardGroup/ToggleSwitch 等 Fluent 风格组件组织设置项。
+不引入 GPLv3 的 PyQt-Fluent-Widgets，保持项目 MIT 许可证。
+保留所有功能逻辑（_load_current_state/_on_apply/各回调）和 config 字段映射 1:1。
 """
 from __future__ import annotations
 
@@ -17,18 +14,24 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QSpinBox,
     QCheckBox, QDialogButtonBox, QLabel, QGroupBox, QTabWidget, QWidget,
     QTextEdit, QPushButton, QFontComboBox, QApplication, QMessageBox,
-    QLineEdit, QStackedWidget, QDoubleSpinBox, QColorDialog, QSlider,
-    QScrollArea, QFrame, QSizePolicy, QFileDialog, QListWidget,
-    QListWidgetItem, QAbstractItemView,
+    QLineEdit, QStackedWidget, QDoubleSpinBox, QColorDialog, QScrollArea,
+    QFrame, QSizePolicy, QFileDialog, QListWidget, QListWidgetItem,
+    QAbstractItemView,
 )
 
 from ..config import Config
 from .theme_engine import (
-    Theme, ThemeColors, ThemeGeometry, ThemeManager, get_theme_manager,
-    BUILTIN_THEMES,
+    Theme, ThemeColors, ThemeGeometry, ThemeManager,
+    get_theme_manager, BUILTIN_THEMES,
+)
+from .fluent_widgets import (
+    SettingCard, SettingCardGroup, ToggleSwitch, build_fluent_qss,
 )
 
 
+# ------------------------------------------------------------------
+# ColorButton（自定义颜色按钮，保留原实现）
+# ------------------------------------------------------------------
 class ColorButton(QPushButton):
     """颜色选择按钮：显示当前颜色色块，点击弹出颜色选择器。"""
 
@@ -66,8 +69,15 @@ class ColorButton(QPushButton):
         self._update_style()
 
 
+# ------------------------------------------------------------------
+# 辅助：把控件包进卡片的一行（标题+说明+控件），返回卡片
+# ------------------------------------------------------------------
+def _row(title: str, content: str, widget: QWidget) -> SettingCard:
+    return SettingCard(title, content, widget)
+
+
 class SettingsDialog(QDialog):
-    """设置对话框 v2。"""
+    """设置对话框（Fluent 风格）。"""
 
     def __init__(self, cfg: Config, panel, parent=None):
         super().__init__(parent)
@@ -76,129 +86,28 @@ class SettingsDialog(QDialog):
         self._theme_mgr = get_theme_manager()
         self.setWindowTitle("全局设置")
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-        self.resize(600, 700)
+        self.resize(640, 720)
         self._init_ui()
         self._load_current_state()
         self._apply_dialog_theme()
 
+    # ---------- 主题 ----------
     def _apply_dialog_theme(self):
-        """设置对话框自身的样式（跟随当前主题）。"""
+        """套用 Fluent 风格 QSS（跟随当前主题）。"""
         colors = self._theme_mgr.current.colors
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: {colors.tray_bg};
-                color: {colors.tray_text};
-            }}
-            QTabWidget::pane {{
-                border: 1px solid {colors.subtitle_border};
-                border-radius: 6px;
-                background-color: {colors.tray_bg};
-            }}
-            /* QScrollArea 及其内容透明，透出 QDialog/Tab 的深色背景，
-               否则外观/行为页会显示系统默认白底，白字看不见 */
-            QScrollArea, QScrollArea > QWidget > QWidget {{
-                background-color: transparent;
-            }}
-            QFrame[frameShape="0"] {{
-                background-color: transparent;
-            }}
-            QTabBar::tab {{
-                background-color: {colors.toolbar_bg};
-                color: {colors.toolbar_text};
-                padding: 8px 16px;
-                margin-right: 2px;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-            }}
-            QTabBar::tab:selected {{
-                background-color: {colors.accent};
-                color: #ffffff;
-            }}
-            QGroupBox {{
-                color: {colors.tray_text};
-                background-color: transparent;
-                border: 1px solid {colors.subtitle_border};
-                border-radius: 6px;
-                margin-top: 12px;
-                padding-top: 12px;
-                font-weight: bold;
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
-            }}
-            QLabel {{ color: {colors.tray_text}; }}
-            QComboBox {{
-                background-color: {colors.btn_bg};
-                color: {colors.btn_text};
-                border: 1px solid {colors.btn_border};
-                border-radius: 4px;
-                padding: 4px 8px;
-            }}
-            QComboBox QAbstractItemView {{
-                background-color: {colors.combo_bg};
-                color: {colors.combo_text};
-                selection-background-color: {colors.combo_selected};
-            }}
-            QSpinBox, QDoubleSpinBox {{
-                background-color: {colors.btn_bg};
-                color: {colors.btn_text};
-                border: 1px solid {colors.btn_border};
-                border-radius: 4px;
-                padding: 3px 6px;
-            }}
-            QPushButton {{
-                background-color: {colors.btn_bg};
-                color: {colors.btn_text};
-                border: 1px solid {colors.btn_border};
-                border-radius: 5px;
-                padding: 6px 14px;
-            }}
-            QPushButton:hover {{ background-color: {colors.btn_hover}; }}
-            QCheckBox {{ color: {colors.tray_text}; spacing: 8px; }}
-            QLineEdit {{
-                background-color: {colors.combo_bg};
-                color: {colors.combo_text};
-                border: 1px solid {colors.btn_border};
-                border-radius: 4px;
-                padding: 4px 8px;
-            }}
-            QTextEdit {{
-                background-color: {colors.combo_bg};
-                color: {colors.combo_text};
-                border: 1px solid {colors.subtitle_border};
-                border-radius: 6px;
-            }}
-            QListWidget {{
-                background-color: {colors.combo_bg};
-                color: {colors.combo_text};
-                border: 1px solid {colors.subtitle_border};
-                border-radius: 6px;
-            }}
-            QListWidget::item:selected {{
-                background-color: {colors.combo_selected};
-            }}
-            QSlider::groove:horizontal {{
-                height: 4px;
-                background: {colors.btn_border};
-                border-radius: 2px;
-            }}
-            QSlider::handle:horizontal {{
-                background: {colors.accent};
-                width: 14px; height: 14px;
-                margin: -5px 0;
-                border-radius: 7px;
-            }}
-            QSlider::sub-page:horizontal {{
-                background: {colors.accent};
-                border-radius: 2px;
-            }}
-        """)
+        self.setStyleSheet(build_fluent_qss(colors))
+        # ToggleSwitch 用 accent 色
+        accent = colors.accent
+        off = colors.subtitle_border
+        knob = "#ffffff"
+        for sw in self.findChildren(ToggleSwitch):
+            sw.set_accent(accent)
+            sw.set_track_colors(off, knob)
 
-    # ---------- 初始化 ----------
+    # ---------- UI 构建 ----------
     def _init_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
 
@@ -209,109 +118,137 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(self._build_transcript_tab(), "文稿")
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
-        # 底部按钮
         btns = QDialogButtonBox(QDialogButtonBox.Apply | QDialogButtonBox.Close)
-        btns.button(QDialogButtonBox.Apply).clicked.connect(self._on_apply)
+        self._apply_btn = btns.button(QDialogButtonBox.Apply)
+        self._apply_btn.setProperty("primary", True)
+        self._apply_btn.clicked.connect(self._on_apply)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
+
+    def _wrap_scroll(self, content: QWidget) -> QScrollArea:
+        """把内容包进 Fluent 风格滚动区。"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(content)
+        return scroll
 
     # ---------- 标签页1：识别 ----------
     def _build_recognition_tab(self) -> QWidget:
         tab = QWidget()
         v = QVBoxLayout(tab)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(8)
 
-        g_recog = QGroupBox("识别引擎")
-        f_recog = QFormLayout(g_recog)
-
+        # 输入源 + 开始停止
         self.device_combo = QComboBox()
         for name, data in self.panel.get_devices():
             self.device_combo.addItem(name, data)
-        f_recog.addRow("输入源：", self.device_combo)
+        v.addWidget(_row("输入源", "选择要捕获的系统音频输出设备", self.device_combo))
 
-        recog_btns = QHBoxLayout()
-        self.start_btn = QPushButton("▶ 开始识别")
-        self.stop_btn = QPushButton("■ 停止识别")
+        # 开始/停止（放在一行卡片）
+        recog_card = SettingCard("识别控制", "开始或停止实时字幕识别", None)
+        rb = QHBoxLayout()
+        rb.setContentsMargins(0, 0, 0, 0)
+        self.start_btn = QPushButton("▶ 开始")
+        self.stop_btn = QPushButton("■ 停止")
         self.start_btn.clicked.connect(self._on_start_click)
         self.stop_btn.clicked.connect(self._on_stop_click)
-        recog_btns.addWidget(self.start_btn)
-        recog_btns.addWidget(self.stop_btn)
-        recog_btns.addStretch(1)
-        f_recog.addRow("", recog_btns)
+        rb.addWidget(self.start_btn)
+        rb.addWidget(self.stop_btn)
+        wb = QWidget()
+        wb.setLayout(rb)
+        recog_card.set_widget(wb)
+        v.addWidget(recog_card)
 
+        # 引擎选择
         self.engine_combo = QComboBox()
         self.engine_combo.addItem("本地 FunASR（流式，需GPU）", "funasr")
         self.engine_combo.addItem("本地 SenseVoice（小模型，CPU可跑）", "sensevoice")
         self.engine_combo.addItem("阿里云 API（流式，任意平台）", "aliyun")
-        f_recog.addRow("引擎：", self.engine_combo)
+        self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
+        v.addWidget(_row("识别引擎", "选择语音识别后端", self.engine_combo))
 
+        # 各引擎配置（QStackedWidget）
         self.engine_stack = QStackedWidget()
         # FunASR
         funasr_panel = QWidget()
-        fp = QFormLayout(funasr_panel)
+        fp = QVBoxLayout(funasr_panel)
+        fp.setContentsMargins(0, 0, 0, 0)
+        fp.setSpacing(4)
         self.funasr_device_combo = QComboBox()
         self.funasr_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
         self.funasr_device_combo.addItem("CPU", "cpu")
-        fp.addRow("设备：", self.funasr_device_combo)
+        fp.addWidget(_row("FunASR 设备", "推理设备，GPU 更快", self.funasr_device_combo))
+        fp.addStretch(1)
         self.engine_stack.addWidget(funasr_panel)
         # SenseVoice
         sv_panel = QWidget()
-        sp = QFormLayout(sv_panel)
+        sp = QVBoxLayout(sv_panel)
+        sp.setContentsMargins(0, 0, 0, 0)
+        sp.setSpacing(4)
         self.sv_device_combo = QComboBox()
-        self.sv_device_combo.addItem("CPU（推荐）", "cpu")
-        self.sv_device_combo.addItem("CUDA", "cuda")
-        sp.addRow("设备：", self.sv_device_combo)
+        self.sv_device_combo.addItem("CPU（推荐，Mac/弱GPU）", "cpu")
+        self.sv_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
+        sp.addWidget(_row("SenseVoice 设备", "推理设备", self.sv_device_combo))
         self.sv_segment_spin = QDoubleSpinBox()
         self.sv_segment_spin.setRange(0.5, 5.0)
         self.sv_segment_spin.setSingleStep(0.5)
         self.sv_segment_spin.setSuffix(" 秒")
-        sp.addRow("攒段时长：", self.sv_segment_spin)
+        sp.addWidget(_row("攒段时长", "越小延迟越低但易切词", self.sv_segment_spin))
+        sp.addStretch(1)
         self.engine_stack.addWidget(sv_panel)
         # 阿里云
         aliyun_panel = QWidget()
-        ap = QFormLayout(aliyun_panel)
+        ap = QVBoxLayout(aliyun_panel)
+        ap.setContentsMargins(0, 0, 0, 0)
+        ap.setSpacing(4)
         self.aliyun_akid_edit = QLineEdit()
         self.aliyun_akid_edit.setPlaceholderText("AccessKey ID")
-        ap.addRow("AK ID：", self.aliyun_akid_edit)
+        ap.addWidget(_row("AccessKey ID", "阿里云控制台获取", self.aliyun_akid_edit))
         self.aliyun_aksecret_edit = QLineEdit()
         self.aliyun_aksecret_edit.setPlaceholderText("AccessKey Secret")
         self.aliyun_aksecret_edit.setEchoMode(QLineEdit.Password)
-        ap.addRow("AK Secret：", self.aliyun_aksecret_edit)
+        ap.addWidget(_row("AccessKey Secret", "阿里云控制台获取", self.aliyun_aksecret_edit))
         self.aliyun_appkey_edit = QLineEdit()
         self.aliyun_appkey_edit.setPlaceholderText("AppKey")
-        ap.addRow("AppKey：", self.aliyun_appkey_edit)
+        ap.addWidget(_row("AppKey", "智能语音交互项目 AppKey", self.aliyun_appkey_edit))
+        hint = QLabel("凭证存于本地 config.yaml，不上传；需先装 nls SDK（见 README）")
+        hint.setStyleSheet("color: #888; font-size: 11px;")
+        hint.setWordWrap(True)
+        ap.addWidget(hint)
+        ap.addStretch(1)
         self.engine_stack.addWidget(aliyun_panel)
+        v.addWidget(self.engine_stack)
 
-        f_recog.addRow("配置：", self.engine_stack)
-        self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
-        v.addWidget(g_recog)
         v.addStretch(1)
-        return tab
+        return self._wrap_scroll(tab)
 
     # ---------- 标签页2：外观 ----------
     def _build_appearance_tab(self) -> QWidget:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
         tab = QWidget()
         v = QVBoxLayout(tab)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(8)
 
-        # ---- 主题选择 ----
-        g_theme = QGroupBox("主题")
-        f_theme = QFormLayout(g_theme)
-
-        theme_row = QHBoxLayout()
+        # 主题
+        g_theme = SettingCardGroup("主题")
+        theme_row = QWidget()
+        tr = QHBoxLayout(theme_row)
+        tr.setContentsMargins(0, 0, 0, 0)
         self.theme_combo = QComboBox()
         for name in self._theme_mgr.get_all_themes():
             self.theme_combo.addItem(name, name)
-        theme_row.addWidget(self.theme_combo, 1)
         self.theme_preview_btn = QPushButton("预览")
         self.theme_preview_btn.clicked.connect(self._on_theme_preview)
-        theme_row.addWidget(self.theme_preview_btn)
-        f_theme.addRow("预设主题：", theme_row)
-
+        tr.addWidget(self.theme_combo)
+        tr.addWidget(self.theme_preview_btn)
+        g_theme.add_card(_row("预设主题", "选择内置或自定义主题", theme_row))
         # 主题管理按钮
-        theme_mgmt = QHBoxLayout()
-        self.save_theme_btn = QPushButton("💾 保存为新主题")
+        mgmt = QWidget()
+        mr = QHBoxLayout(mgmt)
+        mr.setContentsMargins(0, 0, 0, 0)
+        self.save_theme_btn = QPushButton("💾 保存")
         self.save_theme_btn.clicked.connect(self._on_save_theme)
         self.import_theme_btn = QPushButton("📂 导入")
         self.import_theme_btn.clicked.connect(self._on_import_theme)
@@ -319,222 +256,179 @@ class SettingsDialog(QDialog):
         self.export_theme_btn.clicked.connect(self._on_export_theme)
         self.delete_theme_btn = QPushButton("🗑 删除")
         self.delete_theme_btn.clicked.connect(self._on_delete_theme)
-        theme_mgmt.addWidget(self.save_theme_btn)
-        theme_mgmt.addWidget(self.import_theme_btn)
-        theme_mgmt.addWidget(self.export_theme_btn)
-        theme_mgmt.addWidget(self.delete_theme_btn)
-        f_theme.addRow("", theme_mgmt)
+        for b in (self.save_theme_btn, self.import_theme_btn,
+                  self.export_theme_btn, self.delete_theme_btn):
+            mr.addWidget(b)
+        g_theme.add_card(_row("主题管理", "保存当前自定义、导入/导出/删除", mgmt))
         v.addWidget(g_theme)
 
-        # ---- 自定义颜色 ----
-        g_colors = QGroupBox("自定义颜色")
-        f_colors = QFormLayout(g_colors)
-
+        # 自定义颜色
+        g_colors = SettingCardGroup("自定义颜色")
         self.color_buttons: dict[str, ColorButton] = {}
         color_labels = [
-            ("subtitle_bg", "字幕背景"),
-            ("subtitle_text", "字幕文字"),
-            ("subtitle_border", "边框"),
-            ("toolbar_bg", "工具栏背景"),
-            ("btn_bg", "按钮背景"),
-            ("btn_text", "按钮文字"),
-            ("accent", "强调色"),
+            ("subtitle_bg", "字幕背景"), ("subtitle_text", "字幕文字"),
+            ("subtitle_border", "边框"), ("toolbar_bg", "工具栏背景"),
+            ("btn_bg", "按钮背景"), ("btn_text", "按钮文字"), ("accent", "强调色"),
         ]
         for key, label in color_labels:
             btn = ColorButton("#000000")
             self.color_buttons[key] = btn
-            f_colors.addRow(f"{label}：", btn)
-
-        self.apply_colors_btn = QPushButton("🎨 应用颜色到当前主题")
+            g_colors.add_card(_row(label, f"主题颜色：{key}", btn))
+        self.apply_colors_btn = QPushButton("🎨 应用颜色")
+        self.apply_colors_btn.setProperty("primary", True)
         self.apply_colors_btn.clicked.connect(self._on_apply_colors)
-        f_colors.addRow("", self.apply_colors_btn)
+        g_colors.add_card(_row("应用颜色", "把以上颜色应用到当前主题", self.apply_colors_btn))
         v.addWidget(g_colors)
 
-        # ---- 几何参数 ----
-        g_geo = QGroupBox("字幕面板几何")
-        f_geo = QFormLayout(g_geo)
-
+        # 几何参数
+        g_geo = SettingCardGroup("字幕面板几何")
         self.radius_spin = QSpinBox()
         self.radius_spin.setRange(0, 40)
         self.radius_spin.setSuffix(" px")
-        f_geo.addRow("圆角：", self.radius_spin)
-
-        pad_row = QHBoxLayout()
-        self.pad_top_spin = QSpinBox()
-        self.pad_top_spin.setRange(0, 50)
-        self.pad_top_spin.setPrefix("上 ")
-        self.pad_bottom_spin = QSpinBox()
-        self.pad_bottom_spin.setRange(0, 50)
-        self.pad_bottom_spin.setPrefix("下 ")
-        self.pad_left_spin = QSpinBox()
-        self.pad_left_spin.setRange(0, 50)
-        self.pad_left_spin.setPrefix("左 ")
-        self.pad_right_spin = QSpinBox()
-        self.pad_right_spin.setRange(0, 50)
-        self.pad_right_spin.setPrefix("右 ")
-        pad_row.addWidget(self.pad_top_spin)
-        pad_row.addWidget(self.pad_bottom_spin)
-        pad_row.addWidget(self.pad_left_spin)
-        pad_row.addWidget(self.pad_right_spin)
-        f_geo.addRow("内边距：", pad_row)
-
+        g_geo.add_card(_row("圆角", "字幕区圆角半径", self.radius_spin))
+        pad_row = QWidget()
+        pr = QHBoxLayout(pad_row)
+        pr.setContentsMargins(0, 0, 0, 0)
+        self.pad_top_spin = QSpinBox(); self.pad_top_spin.setRange(0, 50); self.pad_top_spin.setPrefix("上 ")
+        self.pad_bottom_spin = QSpinBox(); self.pad_bottom_spin.setRange(0, 50); self.pad_bottom_spin.setPrefix("下 ")
+        self.pad_left_spin = QSpinBox(); self.pad_left_spin.setRange(0, 50); self.pad_left_spin.setPrefix("左 ")
+        self.pad_right_spin = QSpinBox(); self.pad_right_spin.setRange(0, 50); self.pad_right_spin.setPrefix("右 ")
+        for s in (self.pad_top_spin, self.pad_bottom_spin, self.pad_left_spin, self.pad_right_spin):
+            pr.addWidget(s)
+        g_geo.add_card(_row("内边距", "上/下/左/右", pad_row))
         self.line_spacing_spin = QDoubleSpinBox()
         self.line_spacing_spin.setRange(1.0, 3.0)
         self.line_spacing_spin.setSingleStep(0.1)
         self.line_spacing_spin.setSuffix(" ×")
-        f_geo.addRow("行间距：", self.line_spacing_spin)
-
-        self.apply_geo_btn = QPushButton("应用几何参数")
+        g_geo.add_card(_row("行间距", "字幕行距倍数", self.line_spacing_spin))
+        self.apply_geo_btn = QPushButton("应用几何")
         self.apply_geo_btn.clicked.connect(self._on_apply_geometry)
-        f_geo.addRow("", self.apply_geo_btn)
+        g_geo.add_card(_row("应用几何参数", "立即生效", self.apply_geo_btn))
         v.addWidget(g_geo)
 
-        # ---- 字体 ----
-        g_font = QGroupBox("字体")
-        f_font = QFormLayout(g_font)
+        # 字体
+        g_font = SettingCardGroup("字体")
         self.font_combo = QFontComboBox()
-        f_font.addRow("字体：", self.font_combo)
+        g_font.add_card(_row("字体", "字幕字体", self.font_combo))
         self.font_size_spin = QSpinBox()
         self.font_size_spin.setRange(8, 72)
         self.font_size_spin.setSuffix(" pt")
-        f_font.addRow("字号：", self.font_size_spin)
+        g_font.add_card(_row("字号", "字体大小", self.font_size_spin))
         self.opacity_spin = QSpinBox()
         self.opacity_spin.setRange(0, 100)
         self.opacity_spin.setSuffix("%")
-        f_font.addRow("背景透明度：", self.opacity_spin)
+        g_font.add_card(_row("背景透明度", "0=全透明 100=不透明", self.opacity_spin))
         v.addWidget(g_font)
 
         v.addStretch(1)
-        scroll.setWidget(tab)
-        return scroll
+        return self._wrap_scroll(tab)
 
     # ---------- 标签页3：行为 ----------
     def _build_behavior_tab(self) -> QWidget:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
         tab = QWidget()
         v = QVBoxLayout(tab)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(8)
 
         # 窗口
-        g_win = QGroupBox("字幕窗口")
-        f_win = QFormLayout(g_win)
-        win_row = QHBoxLayout()
+        g_win = SettingCardGroup("字幕窗口")
+        size_row = QWidget()
+        sr = QHBoxLayout(size_row)
+        sr.setContentsMargins(0, 0, 0, 0)
         self.win_w_spin = QSpinBox()
         self.win_w_spin.setRange(self.panel.minimumWidth(), 4000)
         self.win_w_spin.setSuffix(" px")
         self.win_h_spin = QSpinBox()
         self.win_h_spin.setRange(self.panel.minimumHeight(), 4000)
         self.win_h_spin.setSuffix(" px")
-        win_row.addWidget(self.win_w_spin)
-        win_row.addWidget(self.win_h_spin)
-        self.apply_size_btn = QPushButton("应用尺寸")
+        sr.addWidget(self.win_w_spin)
+        sr.addWidget(self.win_h_spin)
+        self.apply_size_btn = QPushButton("应用")
         self.apply_size_btn.clicked.connect(self._on_apply_size)
-        win_row.addWidget(self.apply_size_btn)
-        f_win.addRow("宽 × 高：", win_row)
-        self.topmost_check = QCheckBox("启动时窗口置顶")
-        f_win.addRow(self.topmost_check)
+        sr.addWidget(self.apply_size_btn)
+        g_win.add_card(_row("宽 × 高", "字幕窗口尺寸", size_row))
+        self.topmost_check = ToggleSwitch()
+        g_win.add_card(_row("窗口置顶", "始终显示在最前", self.topmost_check))
         v.addWidget(g_win)
 
         # 行为
-        g_behavior = QGroupBox("行为")
-        f_behavior = QFormLayout(g_behavior)
-        self.lock_scroll_check = QCheckBox("锁定滚动到底部")
-        f_behavior.addRow(self.lock_scroll_check)
-        scroll_row = QHBoxLayout()
+        g_behavior = SettingCardGroup("行为")
+        self.lock_scroll_check = ToggleSwitch()
+        g_behavior.add_card(_row("锁定滚动到底部", "新字幕强制跟随，不被滚动打断", self.lock_scroll_check))
         self.scroll_btn = QPushButton("📍 立刻滚动到底部")
         self.scroll_btn.clicked.connect(self._on_scroll_bottom)
-        scroll_row.addWidget(self.scroll_btn)
-        scroll_row.addStretch(1)
-        f_behavior.addRow("", scroll_row)
+        g_behavior.add_card(_row("立刻滚动到底部", "误操作后一键回底", self.scroll_btn))
         self.close_combo = QComboBox()
         self.close_combo.addItem("每次询问", "ask")
         self.close_combo.addItem("直接隐藏到托盘", "hide")
         self.close_combo.addItem("直接退出程序", "quit")
-        f_behavior.addRow("关闭行为：", self.close_combo)
+        g_behavior.add_card(_row("关闭行为", "点✕/Alt+F4时", self.close_combo))
         self.delay_spin = QSpinBox()
         self.delay_spin.setRange(200, 5000)
         self.delay_spin.setSingleStep(100)
-        self.delay_spin.setSuffix(" ms")
-        f_behavior.addRow("工具栏隐藏延时：", self.delay_spin)
+        self.delay_spin.setSuffix(" 毫秒")
+        g_behavior.add_card(_row("工具栏隐藏延时", "鼠标离开后多久隐藏工具栏", self.delay_spin))
         v.addWidget(g_behavior)
 
         # 字幕文本
-        g_sub = QGroupBox("字幕文本")
-        f_sub = QFormLayout(g_sub)
+        g_sub = SettingCardGroup("字幕文本")
         self.maxchars_spin = QSpinBox()
         self.maxchars_spin.setRange(1000, 200000)
         self.maxchars_spin.setSingleStep(1000)
         self.maxchars_spin.setSuffix(" 字符")
-        f_sub.addRow("最大字符数：", self.maxchars_spin)
-        clear_row = QHBoxLayout()
+        g_sub.add_card(_row("最大字符数", "超出后自动从头清理", self.maxchars_spin))
         self.clear_btn = QPushButton("🗑 清空当前字幕")
         self.clear_btn.clicked.connect(self._on_clear_transcript)
-        clear_row.addWidget(self.clear_btn)
-        clear_row.addStretch(1)
-        f_sub.addRow("", clear_row)
+        g_sub.add_card(_row("清空字幕", "清除所有已识别文本", self.clear_btn))
         v.addWidget(g_sub)
 
         v.addStretch(1)
-        scroll.setWidget(tab)
-        return scroll
+        return self._wrap_scroll(tab)
 
     # ---------- 标签页4：皮肤 ----------
     def _build_skin_tab(self) -> QWidget:
         tab = QWidget()
         v = QVBoxLayout(tab)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(8)
 
-        g_skin = QGroupBox("桌宠皮肤")
-        f_skin = QFormLayout(g_skin)
-
-        self.skin_enable_check = QCheckBox("启用贴图皮肤")
-        f_skin.addRow(self.skin_enable_check)
-
-        skin_btns = QHBoxLayout()
+        g_skin = SettingCardGroup("桌宠皮肤")
+        self.skin_enable_check = ToggleSwitch()
+        g_skin.add_card(_row("启用贴图皮肤", "开启后字幕窗口用自定义皮肤渲染", self.skin_enable_check))
         self.skin_editor_btn = QPushButton("🎨 打开皮肤编辑器")
         self.skin_editor_btn.clicked.connect(self._on_open_skin_editor)
-        skin_btns.addWidget(self.skin_editor_btn)
-        skin_btns.addStretch(1)
-        f_skin.addRow("", skin_btns)
-
-        self.skin_list = QListWidget()
-        self.skin_list.setMaximumHeight(150)
-        self.skin_list.addItem("（暂无自定义皮肤）")
-        f_skin.addRow("已安装皮肤：", self.skin_list)
-
+        g_skin.add_card(_row("皮肤编辑器", "创建/编辑自定义皮肤", self.skin_editor_btn))
         v.addWidget(g_skin)
 
-        # 动画设置
-        g_anim = QGroupBox("动画")
-        f_anim = QFormLayout(g_anim)
+        g_anim = SettingCardGroup("动画")
         self.anim_fps_spin = QSpinBox()
         self.anim_fps_spin.setRange(12, 60)
         self.anim_fps_spin.setSuffix(" fps")
-        f_anim.addRow("帧率：", self.anim_fps_spin)
-        self.anim_loop_check = QCheckBox("循环播放动画")
-        f_anim.addRow(self.anim_loop_check)
+        g_anim.add_card(_row("动画帧率", "皮肤动画播放帧率", self.anim_fps_spin))
+        self.anim_loop_check = ToggleSwitch()
+        g_anim.add_card(_row("循环播放", "动画结束后自动重播", self.anim_loop_check))
         v.addWidget(g_anim)
 
-        # 编辑器设置
-        g_editor = QGroupBox("编辑器")
-        f_editor = QFormLayout(g_editor)
-        self.grid_snap_check = QCheckBox("网格吸附")
-        f_editor.addRow(self.grid_snap_check)
+        g_editor = SettingCardGroup("编辑器")
+        self.grid_snap_check = ToggleSwitch()
+        g_editor.add_card(_row("网格吸附", "拖动图层时吸附到网格", self.grid_snap_check))
         self.grid_size_spin = QSpinBox()
         self.grid_size_spin.setRange(4, 32)
         self.grid_size_spin.setSuffix(" px")
-        f_editor.addRow("网格大小：", self.grid_size_spin)
-        self.guides_check = QCheckBox("显示辅助线")
-        f_editor.addRow(self.guides_check)
+        g_editor.add_card(_row("网格尺寸", "吸附网格大小", self.grid_size_spin))
+        self.guides_check = ToggleSwitch()
+        g_editor.add_card(_row("显示辅助线", "编辑器中显示对齐辅助线", self.guides_check))
         v.addWidget(g_editor)
 
         v.addStretch(1)
-        return tab
+        return self._wrap_scroll(tab)
 
-    # ---------- 标签页5：文稿 ----------
+    # ---------- 标签页5：文稿回看 ----------
     def _build_transcript_tab(self) -> QWidget:
         tab = QWidget()
         v = QVBoxLayout(tab)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(8)
         btns = QHBoxLayout()
         self.refresh_btn = QPushButton("🔄 刷新")
         self.copy_btn = QPushButton("📋 复制全部")
@@ -546,14 +440,16 @@ class SettingsDialog(QDialog):
         btns.addWidget(self.copy_btn)
         btns.addWidget(self.clear_btn2)
         btns.addStretch(1)
+        v.addLayout(btns)
         self.transcript_view = QTextEdit()
         self.transcript_view.setReadOnly(True)
         self.transcript_view.setPlaceholderText("（暂无字幕文本）")
-        v.addLayout(btns)
         v.addWidget(self.transcript_view, 1)
         return tab
 
-    # ---------- 加载当前状态 ----------
+    # ============================================================
+    # 以下为功能逻辑方法（原样保留，仅 UI 构建部分重构）
+    # ============================================================
     def _load_current_state(self):
         ui = self.cfg.ui
         asr = self.cfg.asr
@@ -608,12 +504,10 @@ class SettingsDialog(QDialog):
         self.guides_check.setChecked(skin.editor_show_guides)
 
     def _sync_color_buttons(self):
-        """从当前主题同步颜色到 ColorButton。"""
         colors = self._theme_mgr.current.colors
         for key, btn in self.color_buttons.items():
             btn.set_color(getattr(colors, key, "#000000"))
 
-    # ---------- 事件 ----------
     def _on_engine_changed(self, _idx: int):
         self._sync_engine_panel()
 
@@ -662,7 +556,6 @@ class SettingsDialog(QDialog):
         if idx == 4:  # 文稿
             self._refresh_transcript()
 
-    # ---------- 主题操作 ----------
     def _on_theme_preview(self):
         name = self.theme_combo.currentData()
         if name:
@@ -670,7 +563,6 @@ class SettingsDialog(QDialog):
             self._sync_color_buttons()
 
     def _on_apply_colors(self):
-        """把 ColorButton 的颜色应用到当前主题（创建副本）。"""
         theme = self._theme_mgr.current
         colors = theme.colors
         for key, btn in self.color_buttons.items():
@@ -684,7 +576,6 @@ class SettingsDialog(QDialog):
             theme = self._theme_mgr.current
             theme.name = name.strip()
             if self._theme_mgr.save_custom_theme(theme):
-                # 刷新下拉
                 self.theme_combo.clear()
                 for n in self._theme_mgr.get_all_themes():
                     self.theme_combo.addItem(n, n)
@@ -736,11 +627,8 @@ class SettingsDialog(QDialog):
 
     def _on_open_skin_editor(self):
         """打开皮肤编辑器（由 app 层处理）。"""
-        # 这里发信号给 app，由 app 创建编辑器窗口
         self.accept()
-        # TODO: app 层监听并打开 SkinEditorWindow
 
-    # ---------- 应用 ----------
     def _on_apply(self):
         p = self.panel
         asr = self.cfg.asr
