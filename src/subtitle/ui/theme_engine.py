@@ -9,7 +9,9 @@
 """
 from __future__ import annotations
 
+import copy
 import json
+import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
@@ -17,6 +19,11 @@ from typing import Optional
 
 # 主题存储目录
 THEMES_DIR = Path(__file__).resolve().parents[2] / "themes"
+# 回收站：软删除的自定义主题暂存这里，文件名加时间戳，可恢复
+TRASH_DIR = THEMES_DIR / ".trash"
+
+# 基础主题（黑/白）—— 绝对不可删除，作为兜底主题
+PROTECTED_THEMES = frozenset({"Dark", "Light"})
 
 
 @dataclass
@@ -293,6 +300,11 @@ class ThemeManager:
     def __init__(self):
         self._current: Theme = BUILTIN_THEMES["Dark"]
         self._custom_themes: dict[str, Theme] = {}
+        # 内置主题的"原始快照" —— 启动时深拷贝一份，
+        # 用来支持"恢复内置默认值"，避免用户改完 Dark 后回不去。
+        self._builtin_snapshots: dict[str, Theme] = {
+            name: copy.deepcopy(t) for name, t in BUILTIN_THEMES.items()
+        }
         self._load_custom_themes()
 
     @property
@@ -320,32 +332,207 @@ class ThemeManager:
         """直接应用一个 Theme 对象。"""
         self._current = theme
 
-    def save_custom_theme(self, theme: Theme) -> bool:
-        """保存自定义主题到 themes/ 目录。"""
-        theme.is_builtin = False
-        THEMES_DIR.mkdir(parents=True, exist_ok=True)
-        path = THEMES_DIR / f"{self._sanitize_name(theme.name)}.json"
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(theme.to_dict(), f, ensure_ascii=False, indent=2)
-            self._custom_themes[theme.name] = theme
-            return True
-        except Exception as e:
-            print(f"[theme] 保存主题失败: {e}")
+    def reset_builtin(self, name: str) -> bool:
+        """把内置主题恢复为出厂默认值。
+
+        适用场景：用户改了 Dark 的颜色/几何后想回到最初的暗色风格。
+        自定义主题不能 reset（请用 delete_custom_theme 后再 create_blank_theme 重建）。
+        """
+        if name not in BUILTIN_THEMES:
             return False
+        if name not in self._builtin_snapshots:
+            return False
+        fresh = copy.deepcopy(self._builtin_snapshots[name])
+        # 记下旧引用，因为赋值后 BUILTIN_THEMES[name] 就是 fresh 了
+        old_ref = BUILTIN_THEMES[name]
+        BUILTIN_THEMES[name] = fresh
+        # 如果用户当前正用着这个被污染的内置，也一并刷新
+        if self._current is old_ref:
+            self._current = fresh
+        return True
+
+    def create_blank_theme(self, name: str) -> Theme:
+        """从空白默认值创建一个新主题（不复用当前主题的任何字段）。
+
+        适用场景：用户想做一个完全独立的新风格，而不是"基于当前主题改"。
+        返回的主题尚未保存到磁盘，需要调用 save_custom_theme。
+        """
+        # 用 "Dark" 默认 ThemeColors/ThemeGeometry 作为基线（保留原始配色，
+        # 方便用户直接调亮/调暗得到新风格；想从纯黑纯白开始也可以手动改）
+        return Theme(
+            name=name,
+            is_builtin=False,
+            colors=ThemeColors(),
+            geometry=ThemeGeometry(),
+            opacity=0.88,
+        )
+
+    def save_custom_theme(self, theme: Theme, *, new_name: Optional[str] = None) -> bool:
+        """保存主题为自定义（深拷贝，不污染原对象）。
+
+        关键：无论传入的是内置主题还是自定义主题，函数内部都会 deep-copy 一份再写盘。
+        这样调用方继续修改原对象时不会影响磁盘 / 内置主题 / _current 指向的对象。
+
+        如果 new_name 不为空，用它作为保存后的主题名（调用方无需自己改 theme.name）。
+        如果传入的 theme 就是当前 _current，会把 _current 切到新 copy，
+        之后所有"应用颜色/几何"都会改在 copy 上，不会再污染内置。
+        """
+        copy_theme = copy.deepcopy(theme)
+        if new_name:
+            new_name = new_name.strip()
+            if not new_name:
+                return False
+            copy_theme.name = new_name
+        if not copy_theme.name:
+            return False
+        if copy_theme.name in BUILTIN_THEMES:
+            return False  # 不允许用内置主题的名字
+        copy_theme.is_builtin = False
+        THEMES_DIR.mkdir(parents=True, exist_ok=True)
+        if not self._write_theme_file(copy_theme):
+            print(f"[theme] 保存主题失败: {copy_theme.name}")
+            return False
+        # 替换自定义 dict（如果同名旧版本存在，覆盖）
+        self._custom_themes[copy_theme.name] = copy_theme
+        # 如果是当前主题的覆写，把 _current 也切到新 copy
+        if self._current is theme:
+            self._current = copy_theme
+        return True
+
+    def rename_theme(self, old_name: str, new_name: str) -> bool:
+        """重命名主题。
+
+        - 内置主题 → 复制为新的自定义主题（新名），内置本身保持不变。
+        - 自定义主题 → 文件名/字段/dict 全部更新；旧名对应的文件进回收站（可恢复）。
+        - 基础主题（Dark/Light）虽然是内置，不影响重命名逻辑（重命名内置 = 复制为新自定义）。
+        """
+        new_name = new_name.strip()
+        if not new_name or old_name == new_name:
+            return False
+        if new_name in BUILTIN_THEMES:
+            return False
+        if new_name in self._custom_themes:
+            return False
+        if old_name in BUILTIN_THEMES:
+            # 内置：拷贝一份按新名存为自定义；内置不动
+            return self.save_custom_theme(BUILTIN_THEMES[old_name], new_name=new_name)
+        if old_name in self._custom_themes:
+            old_theme = self._custom_themes[old_name]
+            was_current = self._current is old_theme
+            # 旧名软删除进回收站（保底可恢复）
+            self._custom_themes.pop(old_name, None)
+            old_path = THEMES_DIR / f"{self._sanitize_name(old_name)}.json"
+            if old_path.exists():
+                if not self._move_to_trash(old_path):
+                    # 软删除失败，回滚 dict
+                    self._custom_themes[old_name] = old_theme
+                    return False
+            # 写新名
+            new_theme = copy.deepcopy(old_theme)
+            new_theme.name = new_name
+            new_theme.is_builtin = False
+            if not self._write_theme_file(new_theme):
+                # 新文件写失败：回滚（把旧主题从回收站放回）
+                self._custom_themes[old_name] = old_theme
+                return False
+            self._custom_themes[new_name] = new_theme
+            if was_current:
+                self._current = new_theme
+            return True
+        return False
 
     def delete_custom_theme(self, name: str) -> bool:
-        """删除自定义主题。"""
+        """软删除自定义主题（文件移到 themes/.trash/，可从回收站恢复）。
+
+        内置主题（包括基础 Dark/Light）一律不可删除。
+        """
         if name in BUILTIN_THEMES:
             return False
+        self._custom_themes.pop(name, None)
         path = THEMES_DIR / f"{self._sanitize_name(name)}.json"
+        if not path.exists():
+            return True  # 内存已清，文件本来就没有，视为成功
+        if not self._move_to_trash(path):
+            return False
+        return True
+
+    # ---------- 回收站 ----------
+    def list_trashed_themes(self) -> list[dict]:
+        """列出回收站里的主题（按删除时间倒序）。
+
+        返回每项: {"filename", "original_name", "trashed_at", "data"}
+        """
+        if not TRASH_DIR.exists():
+            return []
+        result: list[dict] = []
+        for f in TRASH_DIR.glob("*.json"):
+            try:
+                with open(f, "r", encoding="utf-8") as fp:
+                    data = json.load(fp)
+                result.append({
+                    "filename": f.name,
+                    "original_name": data.get("name", f.stem),
+                    "trashed_at": f.stat().st_mtime,
+                    "data": data,
+                })
+            except Exception:
+                continue
+        result.sort(key=lambda x: x["trashed_at"], reverse=True)
+        return result
+
+    def restore_trashed_theme(self, filename: str, *, new_name: Optional[str] = None) -> Optional[Theme]:
+        """从回收站恢复一个主题。
+
+        - new_name 为空：用原始名恢复（如果该名已被占用则失败）。
+        - new_name 不为空：用新名恢复（也用于重命名后还想换名的情况）。
+        """
+        src = TRASH_DIR / filename
+        if not src.exists():
+            return None
+        try:
+            with open(src, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            theme = Theme.from_dict(data)
+            if new_name:
+                theme.name = new_name.strip()
+            if not theme.name:
+                return None
+            if theme.name in BUILTIN_THEMES:
+                return None
+            if theme.name in self._custom_themes:
+                return None  # 重名
+            # 移回 themes/
+            THEMES_DIR.mkdir(parents=True, exist_ok=True)
+            dst = THEMES_DIR / f"{self._sanitize_name(theme.name)}.json"
+            src.rename(dst)
+            theme.is_builtin = False
+            self._custom_themes[theme.name] = theme
+            return theme
+        except Exception:
+            return None
+
+    def delete_trashed_theme_permanently(self, filename: str) -> bool:
+        """从回收站永久删除一个主题（不可恢复）。"""
+        path = TRASH_DIR / filename
         try:
             if path.exists():
                 path.unlink()
-            self._custom_themes.pop(name, None)
             return True
         except Exception:
             return False
+
+    def empty_trash(self) -> int:
+        """永久清空回收站，返回被删的数量。"""
+        if not TRASH_DIR.exists():
+            return 0
+        count = 0
+        for f in TRASH_DIR.glob("*.json"):
+            try:
+                f.unlink()
+                count += 1
+            except Exception:
+                continue
+        return count
 
     def export_theme(self, theme: Theme, path: Path) -> bool:
         """导出主题到指定路径。"""
@@ -382,6 +569,33 @@ class ThemeManager:
                 self._custom_themes[theme.name] = theme
             except Exception:
                 continue
+
+    def _write_theme_file(self, theme: Theme) -> bool:
+        """把 theme 写到 themes/<name>.json。"""
+        path = THEMES_DIR / f"{self._sanitize_name(theme.name)}.json"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(theme.to_dict(), f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            print(f"[theme] 写文件失败: {e}")
+            return False
+
+    def _move_to_trash(self, path: Path) -> bool:
+        """把 themes/ 下的文件移到 themes/.trash/，文件名加时间戳防冲突。"""
+        try:
+            TRASH_DIR.mkdir(parents=True, exist_ok=True)
+            ts = int(time.time())
+            dst = TRASH_DIR / f"{path.stem}_{ts}{path.suffix}"
+            # 极端情况下同一秒冲突
+            while dst.exists():
+                ts += 1
+                dst = TRASH_DIR / f"{path.stem}_{ts}{path.suffix}"
+            path.rename(dst)
+            return True
+        except Exception as e:
+            print(f"[theme] 移到回收站失败: {e}")
+            return False
 
     @staticmethod
     def _sanitize_name(name: str) -> str:

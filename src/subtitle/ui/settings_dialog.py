@@ -22,11 +22,12 @@ from PySide6.QtWidgets import (
 from ..config import Config
 from .theme_engine import (
     Theme, ThemeColors, ThemeGeometry, ThemeManager,
-    get_theme_manager, BUILTIN_THEMES,
+    get_theme_manager, BUILTIN_THEMES, PROTECTED_THEMES,
 )
 from .fluent_widgets import (
     SettingCard, SettingCardGroup, ToggleSwitch, build_fluent_qss,
 )
+from .trash_dialog import TrashDialog
 
 
 # ------------------------------------------------------------------
@@ -90,6 +91,8 @@ class SettingsDialog(QDialog):
         self._init_ui()
         self._load_current_state()
         self._apply_dialog_theme()
+        # 初始化主题按钮可用性（Dark/Light 不可删等）
+        self._refresh_theme_buttons()
 
     # ---------- 主题 ----------
     def _apply_dialog_theme(self):
@@ -248,18 +251,37 @@ class SettingsDialog(QDialog):
         mgmt = QWidget()
         mr = QHBoxLayout(mgmt)
         mr.setContentsMargins(0, 0, 0, 0)
+        self.new_theme_btn = QPushButton("➕ 新建")
+        self.new_theme_btn.setToolTip("从空白默认值创建一个全新的自定义主题")
+        self.new_theme_btn.clicked.connect(self._on_new_theme)
         self.save_theme_btn = QPushButton("💾 保存")
+        self.save_theme_btn.setToolTip("把当前主题另存为自定义（深拷贝，不污染内置）")
         self.save_theme_btn.clicked.connect(self._on_save_theme)
+        self.rename_theme_btn = QPushButton("✏️ 重命名")
+        self.rename_theme_btn.setToolTip("修改当前主题的名字（内置会复制为新自定义）")
+        self.rename_theme_btn.clicked.connect(self._on_rename_theme)
+        self.reset_theme_btn = QPushButton("🔄 恢复默认")
+        self.reset_theme_btn.setToolTip("把当前选中的内置主题恢复到出厂默认值（自定义主题无效）")
+        self.reset_theme_btn.clicked.connect(self._on_reset_theme)
         self.import_theme_btn = QPushButton("📂 导入")
         self.import_theme_btn.clicked.connect(self._on_import_theme)
         self.export_theme_btn = QPushButton("📤 导出")
         self.export_theme_btn.clicked.connect(self._on_export_theme)
         self.delete_theme_btn = QPushButton("🗑 删除")
+        self.delete_theme_btn.setToolTip("把当前自定义主题移到回收站（可恢复）")
         self.delete_theme_btn.clicked.connect(self._on_delete_theme)
-        for b in (self.save_theme_btn, self.import_theme_btn,
-                  self.export_theme_btn, self.delete_theme_btn):
+        self.trash_btn = QPushButton("📦 回收站")
+        self.trash_btn.setToolTip("恢复或永久删除被软删除的自定义主题")
+        self.trash_btn.clicked.connect(self._on_open_trash)
+        for b in (self.new_theme_btn, self.save_theme_btn, self.rename_theme_btn,
+                  self.reset_theme_btn, self.import_theme_btn, self.export_theme_btn,
+                  self.delete_theme_btn, self.trash_btn):
             mr.addWidget(b)
-        g_theme.add_card(_row("主题管理", "保存当前自定义、导入/导出/删除", mgmt))
+        g_theme.add_card(_row("主题管理",
+                              "新建/保存/重命名/恢复默认/导入/导出/删除/回收站（基础黑白主题不可删）",
+                              mgmt))
+        # 主题下拉变化时刷新按钮可用性
+        self.theme_combo.currentIndexChanged.connect(self._refresh_theme_buttons)
         v.addWidget(g_theme)
 
         # 自定义颜色
@@ -508,6 +530,40 @@ class SettingsDialog(QDialog):
         for key, btn in self.color_buttons.items():
             btn.set_color(getattr(colors, key, "#000000"))
 
+    def _reload_theme_combo(self, *, select: Optional[str] = None):
+        """重建主题下拉。select 为 None 时保留当前选中，否则切到指定主题。"""
+        current = select if select is not None else self.theme_combo.currentData()
+        self.theme_combo.blockSignals(True)
+        self.theme_combo.clear()
+        for n in self._theme_mgr.get_all_themes():
+            self.theme_combo.addItem(n, n)
+        if current and current in self._theme_mgr.get_all_themes():
+            idx = self.theme_combo.findData(current)
+            self.theme_combo.setCurrentIndex(max(0, idx))
+        self.theme_combo.blockSignals(False)
+        self._refresh_theme_buttons()
+
+    def _refresh_theme_buttons(self):
+        """按下拉当前选中项，刷新各按钮的可用性 / tooltip。"""
+        name = self.theme_combo.currentData() or ""
+        is_builtin = name in BUILTIN_THEMES
+        is_protected = name in PROTECTED_THEMES
+        # 删除：基础主题彻底禁用，其他内置给提示，自定义正常
+        if is_protected:
+            self.delete_theme_btn.setEnabled(False)
+            self.delete_theme_btn.setToolTip(f"「{name}」是基础主题（黑白之一），不可删除")
+        else:
+            self.delete_theme_btn.setEnabled(True)
+            self.delete_theme_btn.setToolTip("把当前自定义主题移到回收站（可恢复）")
+        # 恢复默认：仅对内置有意义
+        self.reset_theme_btn.setEnabled(is_builtin)
+        if not is_builtin and name:
+            self.reset_theme_btn.setToolTip("「恢复默认」只对内置主题有效")
+        elif is_builtin:
+            self.reset_theme_btn.setToolTip("把当前选中的内置主题恢复到出厂默认值")
+        # 重命名：内置和自定义都行（内置重命名会复制为新自定义）
+        self.rename_theme_btn.setEnabled(bool(name))
+
     def _on_engine_changed(self, _idx: int):
         self._sync_engine_panel()
 
@@ -572,18 +628,156 @@ class SettingsDialog(QDialog):
     def _on_save_theme(self):
         from PySide6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(self, "保存主题", "主题名称：")
-        if ok and name.strip():
-            theme = self._theme_mgr.current
-            theme.name = name.strip()
-            if self._theme_mgr.save_custom_theme(theme):
-                self.theme_combo.clear()
-                for n in self._theme_mgr.get_all_themes():
-                    self.theme_combo.addItem(n, n)
-                idx = self.theme_combo.findData(name.strip())
-                self.theme_combo.setCurrentIndex(max(0, idx))
-                QMessageBox.information(self, "成功", f"主题「{name.strip()}」已保存")
-            else:
-                QMessageBox.warning(self, "失败", "保存主题失败")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if name in BUILTIN_THEMES:
+            QMessageBox.warning(self, "提示", f"「{name}」是内置主题名称，请换一个")
+            return
+        if self._theme_mgr.get_theme(name):
+            QMessageBox.warning(self, "提示", f"已存在同名主题「{name}」")
+            return
+        # save_custom_theme 内部会 deep-copy，并把 _current 切到新 copy
+        if self._theme_mgr.save_custom_theme(self._theme_mgr.current, new_name=name):
+            self._reload_theme_combo(select=name)
+            # 切到新主题，让后续"应用颜色/几何"都改在 copy 上，不再污染内置
+            self.panel.set_theme(name)
+            self._sync_color_buttons()
+            QMessageBox.information(self, "成功", f"主题「{name}」已保存")
+        else:
+            QMessageBox.warning(self, "失败", "保存主题失败")
+
+    def _on_rename_theme(self):
+        from PySide6.QtWidgets import QInputDialog
+        current_name = self.theme_combo.currentData()
+        if not current_name:
+            return
+        new_name, ok = QInputDialog.getText(
+            self, "重命名主题", "新名称：", text=current_name,
+        )
+        if not ok:
+            return
+        new_name = new_name.strip()
+        if not new_name or new_name == current_name:
+            return
+        if new_name in BUILTIN_THEMES:
+            QMessageBox.warning(self, "提示", f"「{new_name}」是内置主题名称，请换一个")
+            return
+        if self._theme_mgr.get_theme(new_name):
+            QMessageBox.warning(self, "提示", f"已存在同名主题「{new_name}」")
+            return
+        if not self._theme_mgr.rename_theme(current_name, new_name):
+            QMessageBox.warning(self, "失败", "重命名失败")
+            return
+        self._reload_theme_combo(select=new_name)
+        self.panel.set_theme(new_name)
+        QMessageBox.information(
+            self, "成功",
+            f"已重命名为「{new_name}」"
+            + ("\n（旧主题文件已移入回收站，可恢复）" if current_name not in BUILTIN_THEMES else
+               "\n（内置主题未受影响，新主题是它的副本）"),
+        )
+
+    def _on_delete_theme(self):
+        name = self.theme_combo.currentData()
+        if not name:
+            return
+        if name in PROTECTED_THEMES:
+            QMessageBox.warning(
+                self, "禁止删除",
+                f"「{name}」是基础主题（黑白之一），不可删除。\n"
+                f"这是软件的兜底主题，删了就没法换回去了。",
+            )
+            return
+        if name in BUILTIN_THEMES:
+            QMessageBox.warning(
+                self, "提示",
+                f"「{name}」是内置主题，不可删除。\n"
+                f"想要改它？用「💾 保存」另存为自定义主题后再改。",
+            )
+            return
+        ret = QMessageBox.question(
+            self, "移到回收站",
+            f"确定把「{name}」移到回收站？\n（可在「📦 回收站」恢复）",
+        )
+        if ret != QMessageBox.Yes:
+            return
+        if not self._theme_mgr.delete_custom_theme(name):
+            QMessageBox.warning(self, "失败", "删除失败")
+            return
+        self._reload_theme_combo(select="Dark")  # 删完后回退到 Dark
+        self.panel.set_theme("Dark")
+        self._sync_color_buttons()
+        QMessageBox.information(self, "完成", f"「{name}」已移到回收站")
+
+    def _on_open_trash(self):
+        dlg = TrashDialog(self)
+        dlg.exec()
+        # 回收站变化可能影响 _custom_themes，刷新一下下拉
+        self._reload_theme_combo(select=self.theme_combo.currentData())
+
+    def _on_reset_theme(self):
+        """把当前选中的内置主题恢复为出厂默认值。"""
+        name = self.theme_combo.currentData()
+        if not name:
+            return
+        if name not in BUILTIN_THEMES:
+            QMessageBox.warning(
+                self, "提示",
+                "「恢复默认」仅对内置主题有效。\n"
+                "自定义主题如需回到初始状态，请用「🗑 删除」后再点「➕ 新建」。",
+            )
+            return
+        ret = QMessageBox.question(
+            self, "恢复默认",
+            f"确定把内置主题「{name}」恢复到出厂默认值？\n"
+            f"当前对该主题的所有颜色/几何修改都会丢失。",
+        )
+        if ret != QMessageBox.Yes:
+            return
+        if not self._theme_mgr.reset_builtin(name):
+            QMessageBox.warning(self, "失败", "恢复失败")
+            return
+        # 重新应用：让 panel 重新读取内置主题的字段
+        self.panel.set_theme(name)
+        self._sync_color_buttons()
+        # 同步几何 spinbox 的当前值
+        geo = self._theme_mgr.current.geometry
+        self.radius_spin.setValue(geo.border_radius)
+        self.pad_top_spin.setValue(geo.padding_top)
+        self.pad_bottom_spin.setValue(geo.padding_bottom)
+        self.pad_left_spin.setValue(geo.padding_left)
+        self.pad_right_spin.setValue(geo.padding_right)
+        self.line_spacing_spin.setValue(geo.line_spacing)
+        self.font_combo.setCurrentFont(QFont(geo.font_family))
+        self.font_size_spin.setValue(geo.font_size)
+        self.opacity_spin.setValue(int(self._theme_mgr.current.opacity * 100))
+        QMessageBox.information(self, "完成", f"「{name}」已恢复到出厂默认值")
+
+    def _on_new_theme(self):
+        """从空白默认值新建一个自定义主题（不复制当前主题的任何字段）。"""
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "新建主题", "新主题名称：")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        # 检查重名（内置 + 自定义 都不能重名）
+        if name in BUILTIN_THEMES:
+            QMessageBox.warning(self, "提示", f"「{name}」是内置主题名称，请换一个")
+            return
+        if self._theme_mgr.get_theme(name):
+            QMessageBox.warning(self, "提示", f"已存在同名主题「{name}」，请换一个")
+            return
+        new_theme = self._theme_mgr.create_blank_theme(name)
+        if not self._theme_mgr.save_custom_theme(new_theme):
+            QMessageBox.warning(self, "失败", "保存新主题失败")
+            return
+        # 刷新下拉
+        self._reload_theme_combo(select=name)
+        # 立即切换到这个新主题，方便用户接着编辑
+        self.panel.set_theme(name)
+        self._sync_color_buttons()
+        QMessageBox.information(self, "成功", f"已新建主题「{name}」，可在下方自定义颜色和几何参数")
 
     def _on_import_theme(self):
         path, _ = QFileDialog.getOpenFileName(self, "导入主题", "", "JSON (*.json)")
@@ -591,9 +785,7 @@ class SettingsDialog(QDialog):
             from pathlib import Path
             theme = self._theme_mgr.import_theme(Path(path))
             if theme:
-                self.theme_combo.clear()
-                for n in self._theme_mgr.get_all_themes():
-                    self.theme_combo.addItem(n, n)
+                self._reload_theme_combo()
                 QMessageBox.information(self, "成功", f"已导入主题「{theme.name}」")
             else:
                 QMessageBox.warning(self, "失败", "导入失败，文件格式不正确")
@@ -604,18 +796,6 @@ class SettingsDialog(QDialog):
             from pathlib import Path
             if self._theme_mgr.export_theme(self._theme_mgr.current, Path(path)):
                 QMessageBox.information(self, "成功", "主题已导出")
-
-    def _on_delete_theme(self):
-        name = self.theme_combo.currentData()
-        if name in BUILTIN_THEMES:
-            QMessageBox.warning(self, "提示", "内置主题不可删除")
-            return
-        ret = QMessageBox.question(self, "删除主题", f"确定删除「{name}」？")
-        if ret == QMessageBox.Yes:
-            self._theme_mgr.delete_custom_theme(name)
-            self.theme_combo.clear()
-            for n in self._theme_mgr.get_all_themes():
-                self.theme_combo.addItem(n, n)
 
     def _on_apply_geometry(self):
         self.panel.set_border_radius(self.radius_spin.value())
