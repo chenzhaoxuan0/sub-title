@@ -347,7 +347,8 @@ class SettingsDialog(QDialog):
         self.font_combo.setMinimumWidth(220)
         g_font.add_card(_row("字体", "字幕字体", self.font_combo))
         self.font_size_spin = QSpinBox()
-        self.font_size_spin.setRange(8, 72)
+        # 最小 4（与工具栏 A-/A+ 按钮的下界对齐；之前是 8）
+        self.font_size_spin.setRange(4, 72)
         self.font_size_spin.setSuffix(" pt")
         g_font.add_card(_row("字号", "字体大小", self.font_size_spin))
         self.opacity_spin = QSpinBox()

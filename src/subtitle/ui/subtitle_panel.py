@@ -260,23 +260,24 @@ class SubtitlePanel(QWidget):
         self._add_expanding(tb, self.opacity_spin)
         self._add_expanding(tb, self.close_btn)
 
-        # ---- 状态栏 ----
-        self.status_label = QLabel("就绪")
+        # ---- 状态栏（overlay，浮在 container 底部）----
+        # 之前是 addLayout(bottom) → view 被往上顶，状态栏显隐会让字幕位置跳一下。
+        # 改成 overlay：view 始终占满整个 container 高度，状态栏显隐不影响字幕位置。
+        # 关键：parent 必须是 self.container（不是 self），坐标系才和 grip 一致；
+        # 不要设 WA_TranslucentBackground —— 在 child of translucent parent 上会触发
+        # "提升为顶层窗口" 的副作用，setGeometry 会被解读为全局坐标，状态栏飘到桌面左上角。
+        # QLabel 默认背景就是透明的（没 QSS 背景），不需要这个 flag。
+        self.status_label = QLabel("就绪", self.container)
         self.status_label.setObjectName("status")
 
-        # ---- 缩放手柄 ----
+        # ---- 缩放手柄（也是 overlay，child of container）----
         self.grip = QSizeGrip(self.container)
         self.grip.setObjectName("grip")
         self.grip.setFixedSize(16, 16)
 
-        # 组装 container
+        # 组装 container —— 只有 view，撑满整个高度
         container_layout.addWidget(self.view, 1)
-        bottom = QHBoxLayout()
-        bottom.setContentsMargins(10, 0, 10, 4)
-        bottom.addWidget(self.status_label)
-        bottom.addStretch(1)
-        bottom.addWidget(self.grip, 0, Qt.AlignRight | Qt.AlignBottom)
-        container_layout.addLayout(bottom)
+        # status_label + grip 在 _layout_window 里绝对定位（不 add 到 layout）
 
         # 初始隐藏
         self.toolbar.setVisible(False)
@@ -509,7 +510,8 @@ class SubtitlePanel(QWidget):
         self._notify_geometry()
 
     def _change_font_size(self, delta: int):
-        self._font_size = max(12, min(56, self._font_size + delta))
+        # 最小 4，与全局设置里 font_size_spin 的下界对齐（之前是 12）
+        self._font_size = max(4, min(56, self._font_size + delta))
         self._apply_font()
         self.ui_cfg.font_size = self._font_size
         self._notify_geometry()
@@ -660,8 +662,30 @@ class SubtitlePanel(QWidget):
             self.container.setGeometry(0, tb_h, content_w, content_h)
             # overlay 跟随 container
             self.overlay_layer.setGeometry(0, 0, content_w, content_h)
+            # 状态栏 + 缩放手柄：浮在 container 底部（不占 view 空间）
+            self._layout_bottom_overlay(content_w, content_h)
         finally:
             self._laying_out = False
+
+    def _layout_bottom_overlay(self, content_w: int, content_h: int) -> None:
+        """把 status_label + grip 浮在 container 底部（坐标系：container 局部）。"""
+        # 缩放手柄：右下角
+        self.grip.move(content_w - 16 - 4, content_h - 16 - 4)
+        # 状态栏：底部贴底，左对齐，宽度留出 grip 位置
+        # 关键安全：content_w 可能很小（30px 最小窗口），要给个最小宽度
+        status_h = self.status_label.sizeHint().height() or 18
+        status_w = max(40, content_w - 32 - 16 - 4)   # 最少 40px，避免 0 宽
+        status_x = 10
+        # 坐标：container 内的局部坐标（status_label 是 container 的 child）
+        self.status_label.setGeometry(
+            status_x,                    # 左边距
+            content_h - status_h - 2,    # 贴底（留 2px 边距）
+            status_w,
+            status_h,
+        )
+        # 状态栏和 grip 都 raise_ 到最上层，确保不被 view 盖住
+        self.status_label.raise_()
+        self.grip.raise_()
 
     def _add_expanding(self, layout, widget):
         widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -884,7 +908,8 @@ class SubtitlePanel(QWidget):
         self.font_combo.blockSignals(False)
 
     def set_font_size(self, size: int):
-        self._font_size = max(8, min(72, int(size)))
+        # 最小 4，与工具栏 A-/A+ 按钮的下界对齐
+        self._font_size = max(4, min(72, int(size)))
         self.ui_cfg.font_size = self._font_size
         self._apply_font()
 
