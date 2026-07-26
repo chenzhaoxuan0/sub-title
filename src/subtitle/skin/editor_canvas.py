@@ -32,10 +32,13 @@ class SkinCanvas(QWidget):
         self.grid_size = 8
         self.guides_enabled = True
         self.background = QPixmap()
+        self.viewport_width = max(1, skin.design_width)
+        self.viewport_height = max(1, skin.design_height)
         self._mode: Optional[str] = None
         self._press_pos = QPointF()
         self._start_values: dict[str, float] = {}
         self._start_angle = 0.0
+        self._interaction_mapping: Optional[tuple[QRectF, float, QPointF]] = None
         self.setMinimumSize(500, 260)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
@@ -63,6 +66,15 @@ class SkinCanvas(QWidget):
         self.background = pixmap
         self.update()
 
+    def set_viewport_size(self, width: int, height: int) -> None:
+        width = max(1, int(width))
+        height = max(1, int(height))
+        if (width, height) == (self.viewport_width, self.viewport_height):
+            return
+        self.viewport_width = width
+        self.viewport_height = height
+        self.update()
+
     def select_layer(self, layer_id: Optional[str]) -> None:
         self.selected_layer_id = layer_id
         self.update()
@@ -81,18 +93,60 @@ class SkinCanvas(QWidget):
         self.renderer.set_time(self.current_time)
         self.update()
 
-    def _preview_rect(self) -> QRectF:
+    def _reference_scale(self) -> float:
+        return max(0.0001, min(
+            self.viewport_width / max(1, self.skin.design_width),
+            self.viewport_height / max(1, self.skin.design_height),
+        ))
+
+    def _scene_bounds(self) -> QRectF:
+        content = QRectF(0, 0, self.viewport_width, self.viewport_height)
+        padding_x = max(80.0, self.viewport_width * 0.25)
+        padding_y = max(80.0, self.viewport_height * 0.75)
+        bounds = content.adjusted(-padding_x, -padding_y, padding_x, padding_y)
+        for layer in self.skin.layers:
+            if not layer.visible:
+                continue
+            polygon = self.renderer.get_layer_polygon(
+                layer, self.viewport_width, self.viewport_height
+            )
+            if not polygon.isEmpty():
+                bounds = bounds.united(polygon.boundingRect().adjusted(-24, -24, 24, 24))
+        return bounds
+
+    def _scene_mapping(self) -> tuple[QRectF, float, QPointF]:
+        if self._interaction_mapping is not None:
+            return self._interaction_mapping
         margin = 18.0
+        bounds = self._scene_bounds()
         available_w = max(1.0, self.width() - margin * 2)
         available_h = max(1.0, self.height() - margin * 2)
-        scale = min(available_w / self.skin.design_width, available_h / self.skin.design_height)
-        width = self.skin.design_width * scale
-        height = self.skin.design_height * scale
-        return QRectF((self.width() - width) / 2, (self.height() - height) / 2, width, height)
+        scale = max(0.0001, min(available_w / bounds.width(), available_h / bounds.height()))
+        rendered_w = bounds.width() * scale
+        rendered_h = bounds.height() * scale
+        origin = QPointF(
+            (self.width() - rendered_w) / 2 - bounds.left() * scale,
+            (self.height() - rendered_h) / 2 - bounds.top() * scale,
+        )
+        return bounds, scale, origin
 
-    def _to_preview(self, point: QPointF) -> QPointF:
-        rect = self._preview_rect()
-        return QPointF(point.x() - rect.left(), point.y() - rect.top())
+    def _preview_rect(self) -> QRectF:
+        _, scale, origin = self._scene_mapping()
+        return QRectF(
+            origin.x(), origin.y(),
+            self.viewport_width * scale, self.viewport_height * scale,
+        )
+
+    def _to_scene(self, point: QPointF) -> QPointF:
+        _, scale, origin = self._scene_mapping()
+        return QPointF(
+            (point.x() - origin.x()) / scale,
+            (point.y() - origin.y()) / scale,
+        )
+
+    def _from_scene(self, point: QPointF) -> QPointF:
+        _, scale, origin = self._scene_mapping()
+        return QPointF(point.x() * scale + origin.x(), point.y() * scale + origin.y())
 
     def _effective(self, layer: Layer, property_name: str) -> float:
         if self.action is not None:
@@ -108,30 +162,37 @@ class SkinCanvas(QWidget):
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         painter.fillRect(self.rect(), QColor("#11131a"))
         preview = self._preview_rect()
+        _, display_scale, origin = self._scene_mapping()
         painter.save()
-        painter.translate(preview.topLeft())
-        target = QRectF(0, 0, preview.width(), preview.height()).toRect()
+        painter.translate(origin)
+        painter.scale(display_scale, display_scale)
+        target = QRectF(0, 0, self.viewport_width, self.viewport_height).toRect()
         if not self.background.isNull():
             painter.drawPixmap(target, self.background)
         else:
             painter.fillRect(target, QColor("#242733"))
         if self.grid_enabled:
-            scale = preview.width() / self.skin.design_width
-            painter.setPen(QPen(QColor(255, 255, 255, 22), 1))
-            step = max(2.0, self.grid_size * scale)
+            painter.setPen(QPen(QColor(255, 255, 255, 22), 1 / display_scale))
+            step = max(2.0, self.grid_size * self._reference_scale())
             position = 0.0
-            while position <= preview.width():
-                painter.drawLine(QPointF(position, 0), QPointF(position, preview.height()))
+            while position <= self.viewport_width:
+                painter.drawLine(QPointF(position, 0), QPointF(position, self.viewport_height))
                 position += step
             position = 0.0
-            while position <= preview.height():
-                painter.drawLine(QPointF(0, position), QPointF(preview.width(), position))
+            while position <= self.viewport_height:
+                painter.drawLine(QPointF(0, position), QPointF(self.viewport_width, position))
                 position += step
         if self.guides_enabled:
-            painter.setPen(QPen(QColor(100, 190, 255, 90), 1, Qt.DashLine))
-            painter.drawLine(QPointF(preview.width() / 2, 0), QPointF(preview.width() / 2, preview.height()))
-            painter.drawLine(QPointF(0, preview.height() / 2), QPointF(preview.width(), preview.height() / 2))
-        self.renderer.render(painter, int(preview.width()), int(preview.height()))
+            painter.setPen(QPen(QColor(100, 190, 255, 90), 1 / display_scale, Qt.DashLine))
+            painter.drawLine(
+                QPointF(self.viewport_width / 2, 0),
+                QPointF(self.viewport_width / 2, self.viewport_height),
+            )
+            painter.drawLine(
+                QPointF(0, self.viewport_height / 2),
+                QPointF(self.viewport_width, self.viewport_height / 2),
+            )
+        self.renderer.render(painter, self.viewport_width, self.viewport_height)
         painter.restore()
         painter.setPen(QPen(QColor("#5c637a"), 1))
         painter.drawRect(preview)
@@ -143,9 +204,9 @@ class SkinCanvas(QWidget):
         if layer is None:
             return QPolygonF()
         polygon = self.renderer.get_layer_polygon(
-            layer, int(preview.width()), int(preview.height())
+            layer, self.viewport_width, self.viewport_height
         )
-        return QPolygonF([point + preview.topLeft() for point in polygon])
+        return QPolygonF([self._from_scene(point) for point in polygon])
 
     def _handles(self, preview: QRectF) -> dict[str, QPointF]:
         polygon = self._selection_polygon(preview)
@@ -184,7 +245,7 @@ class SkinCanvas(QWidget):
             return
         point = event.position()
         preview = self._preview_rect()
-        if not preview.contains(point):
+        if not self.rect().contains(point.toPoint()):
             self.canvas_clicked.emit()
             return
         layer = self.skin.get_layer_by_id(self.selected_layer_id or "")
@@ -196,17 +257,28 @@ class SkinCanvas(QWidget):
             elif self._near(point, handles["scale"]):
                 mode = "scale"
         if mode is None:
+            scene_point = self._to_scene(point)
             hit = self.renderer.layer_at(
-                self._to_preview(point), int(preview.width()), int(preview.height()), alpha_test=True
+                scene_point, self.viewport_width, self.viewport_height, alpha_test=True
             )
-            if hit is None or hit.locked:
+            if hit is None and layer is not None:
+                selected_polygon = self.renderer.get_layer_polygon(
+                    layer, self.viewport_width, self.viewport_height
+                )
+                if selected_polygon.containsPoint(scene_point, Qt.OddEvenFill):
+                    hit = layer
+            if hit is None:
                 self.canvas_clicked.emit()
                 return
             layer = hit
             self.selected_layer_id = layer.id
             self.layer_selected.emit(layer.id)
+            if layer.locked:
+                self.update()
+                return
             mode = "move"
         self._mode = mode
+        self._interaction_mapping = self._scene_mapping()
         self._press_pos = point
         self._start_values = {
             name: self._effective(layer, name) for name in ANIMATABLE_PROPERTIES
@@ -226,7 +298,8 @@ class SkinCanvas(QWidget):
             return
         point = event.position()
         preview = self._preview_rect()
-        design_scale = preview.width() / self.skin.design_width
+        _, display_scale, _ = self._scene_mapping()
+        design_scale = display_scale * self._reference_scale()
         if self._mode == "move":
             delta = (point - self._press_pos) / max(0.0001, design_scale)
             new_x = self._start_values["x"] + delta.x()
@@ -262,7 +335,9 @@ class SkinCanvas(QWidget):
         del event
         if self._mode:
             self._mode = None
+            self._interaction_mapping = None
             self.edit_finished.emit()
+            self.update()
 
     def keyPressEvent(self, event) -> None:
         layer = self.skin.get_layer_by_id(self.selected_layer_id or "")

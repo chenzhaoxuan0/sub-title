@@ -34,10 +34,16 @@ def safe_name(name: str) -> str:
 def list_skin_directories(root: Path) -> list[Path]:
     if not root.exists():
         return []
-    return sorted(
-        (item for item in root.iterdir() if item.is_dir() and (item / SKIN_FILE).exists()),
-        key=lambda item: item.name.lower(),
-    )
+    valid = []
+    for item in root.iterdir():
+        if not item.is_dir() or not (item / SKIN_FILE).is_file():
+            continue
+        try:
+            load_skin_directory(item)
+        except Exception:
+            continue
+        valid.append(item)
+    return sorted(valid, key=lambda item: item.name.lower())
 
 
 def load_skin_directory(directory: Path) -> SkinDefinition:

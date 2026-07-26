@@ -640,6 +640,9 @@ class SettingsDialog(QDialog):
         for key, btn in self.color_buttons.items():
             setattr(colors, key, btn.get_color())
         self.panel.set_theme_obj(theme)
+        if theme.name not in BUILTIN_THEMES:
+            if not self._theme_mgr.persist_custom_theme(theme):
+                QMessageBox.warning(self, "保存失败", f"主题“{theme.name}”的颜色未能写入磁盘")
 
     def _on_save_theme(self):
         from PySide6.QtWidgets import QInputDialog
@@ -814,12 +817,23 @@ class SettingsDialog(QDialog):
                 QMessageBox.information(self, "成功", "主题已导出")
 
     def _on_apply_geometry(self):
+        theme = self._theme_mgr.current
+        geometry = theme.geometry
+        geometry.border_radius = self.radius_spin.value()
+        geometry.padding_top = self.pad_top_spin.value()
+        geometry.padding_bottom = self.pad_bottom_spin.value()
+        geometry.padding_left = self.pad_left_spin.value()
+        geometry.padding_right = self.pad_right_spin.value()
+        geometry.line_spacing = self.line_spacing_spin.value()
         self.panel.set_border_radius(self.radius_spin.value())
         self.panel.set_padding(
             self.pad_top_spin.value(), self.pad_bottom_spin.value(),
             self.pad_left_spin.value(), self.pad_right_spin.value(),
         )
         self.panel.set_line_spacing(self.line_spacing_spin.value())
+        if theme.name not in BUILTIN_THEMES:
+            if not self._theme_mgr.persist_custom_theme(theme):
+                QMessageBox.warning(self, "保存失败", f"主题“{theme.name}”的几何参数未能写入磁盘")
 
     def _on_open_skin_editor(self):
         """打开皮肤编辑器（由 app 层处理）。"""
@@ -841,6 +855,11 @@ class SettingsDialog(QDialog):
 
         # 外观
         theme_name = self.theme_combo.currentData()
+        editing_current_theme = theme_name == self._theme_mgr.current.name
+        if editing_current_theme:
+            colors = self._theme_mgr.current.colors
+            for key, button in self.color_buttons.items():
+                setattr(colors, key, button.get_color())
         if theme_name:
             p.set_theme(theme_name)
         p.set_font_family(self.font_combo.currentFont().family())
@@ -852,6 +871,18 @@ class SettingsDialog(QDialog):
             self.pad_left_spin.value(), self.pad_right_spin.value(),
         )
         p.set_line_spacing(self.line_spacing_spin.value())
+        if editing_current_theme and theme_name not in BUILTIN_THEMES:
+            theme = self._theme_mgr.current
+            theme.geometry.border_radius = self.radius_spin.value()
+            theme.geometry.padding_top = self.pad_top_spin.value()
+            theme.geometry.padding_bottom = self.pad_bottom_spin.value()
+            theme.geometry.padding_left = self.pad_left_spin.value()
+            theme.geometry.padding_right = self.pad_right_spin.value()
+            theme.geometry.line_spacing = self.line_spacing_spin.value()
+            theme.geometry.font_family = self.font_combo.currentFont().family()
+            theme.geometry.font_size = self.font_size_spin.value()
+            theme.opacity = self.opacity_spin.value() / 100.0
+            self._theme_mgr.persist_custom_theme(theme)
 
         # 行为
         p.set_window_size(self.win_w_spin.value(), self.win_h_spin.value())

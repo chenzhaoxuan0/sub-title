@@ -41,6 +41,20 @@ class SkinRendererTests(unittest.TestCase):
         renderer.set_time(2)
         self.assertEqual(renderer._asset_path_at(layer), "b.png")
 
+    def test_skin_bounds_include_layers_outside_canvas(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            image = QImage(20, 20, QImage.Format_ARGB32)
+            image.fill(QColor(255, 0, 0, 255))
+            image.save(str(Path(temporary) / "image.png"))
+            layer = Layer(name="outside", image_path="image.png", x=-10, y=-12)
+            renderer = SkinRenderer(
+                SkinDefinition(design_width=100, design_height=50, layers=[layer]),
+                Path(temporary),
+            )
+            bounds = renderer.get_skin_bounds(100, 50)
+            self.assertLess(bounds.left(), 0)
+            self.assertLess(bounds.top(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

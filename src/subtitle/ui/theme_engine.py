@@ -11,14 +11,18 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
+from ..paths import user_data_dir
+
 
 # 主题存储目录
-THEMES_DIR = Path(__file__).resolve().parents[2] / "themes"
+LEGACY_THEMES_DIR = Path(__file__).resolve().parents[2] / "themes"
+THEMES_DIR = user_data_dir() / "themes"
 # 回收站：软删除的自定义主题暂存这里，文件名加时间戳，可恢复
 TRASH_DIR = THEMES_DIR / ".trash"
 
@@ -297,7 +301,16 @@ _register(Theme(
 class ThemeManager:
     """管理主题的加载、保存、切换。"""
 
-    def __init__(self):
+    def __init__(
+        self,
+        themes_dir: Optional[Path] = None,
+        legacy_themes_dir: Optional[Path] = LEGACY_THEMES_DIR,
+    ):
+        self._themes_dir = Path(themes_dir) if themes_dir is not None else THEMES_DIR
+        self._trash_dir = self._themes_dir / ".trash"
+        self._legacy_themes_dir = (
+            Path(legacy_themes_dir) if legacy_themes_dir is not None else None
+        )
         self._current: Theme = BUILTIN_THEMES["Dark"]
         self._custom_themes: dict[str, Theme] = {}
         # 内置主题的"原始快照" —— 启动时深拷贝一份，
@@ -305,6 +318,7 @@ class ThemeManager:
         self._builtin_snapshots: dict[str, Theme] = {
             name: copy.deepcopy(t) for name, t in BUILTIN_THEMES.items()
         }
+        self._migrate_legacy_themes()
         self._load_custom_themes()
 
     @property
@@ -388,7 +402,7 @@ class ThemeManager:
         if copy_theme.name in BUILTIN_THEMES:
             return False  # 不允许用内置主题的名字
         copy_theme.is_builtin = False
-        THEMES_DIR.mkdir(parents=True, exist_ok=True)
+        self._themes_dir.mkdir(parents=True, exist_ok=True)
         if not self._write_theme_file(copy_theme):
             print(f"[theme] 保存主题失败: {copy_theme.name}")
             return False
@@ -397,6 +411,18 @@ class ThemeManager:
         # 如果是当前主题的覆写，把 _current 也切到新 copy
         if self._current is theme:
             self._current = copy_theme
+        return True
+
+    def persist_custom_theme(self, theme: Optional[Theme] = None) -> bool:
+        """Persist edits made to an existing custom theme."""
+        theme = theme or self._current
+        if not theme.name or theme.name in BUILTIN_THEMES:
+            return False
+        theme.is_builtin = False
+        self._themes_dir.mkdir(parents=True, exist_ok=True)
+        if not self._write_theme_file(theme):
+            return False
+        self._custom_themes[theme.name] = theme
         return True
 
     def rename_theme(self, old_name: str, new_name: str) -> bool:
@@ -421,7 +447,7 @@ class ThemeManager:
             was_current = self._current is old_theme
             # 旧名软删除进回收站（保底可恢复）
             self._custom_themes.pop(old_name, None)
-            old_path = THEMES_DIR / f"{self._sanitize_name(old_name)}.json"
+            old_path = self._themes_dir / f"{self._sanitize_name(old_name)}.json"
             if old_path.exists():
                 if not self._move_to_trash(old_path):
                     # 软删除失败，回滚 dict
@@ -449,7 +475,7 @@ class ThemeManager:
         if name in BUILTIN_THEMES:
             return False
         self._custom_themes.pop(name, None)
-        path = THEMES_DIR / f"{self._sanitize_name(name)}.json"
+        path = self._themes_dir / f"{self._sanitize_name(name)}.json"
         if not path.exists():
             return True  # 内存已清，文件本来就没有，视为成功
         if not self._move_to_trash(path):
@@ -462,10 +488,10 @@ class ThemeManager:
 
         返回每项: {"filename", "original_name", "trashed_at", "data"}
         """
-        if not TRASH_DIR.exists():
+        if not self._trash_dir.exists():
             return []
         result: list[dict] = []
-        for f in TRASH_DIR.glob("*.json"):
+        for f in self._trash_dir.glob("*.json"):
             try:
                 with open(f, "r", encoding="utf-8") as fp:
                     data = json.load(fp)
@@ -486,7 +512,7 @@ class ThemeManager:
         - new_name 为空：用原始名恢复（如果该名已被占用则失败）。
         - new_name 不为空：用新名恢复（也用于重命名后还想换名的情况）。
         """
-        src = TRASH_DIR / filename
+        src = self._trash_dir / filename
         if not src.exists():
             return None
         try:
@@ -502,8 +528,8 @@ class ThemeManager:
             if theme.name in self._custom_themes:
                 return None  # 重名
             # 移回 themes/
-            THEMES_DIR.mkdir(parents=True, exist_ok=True)
-            dst = THEMES_DIR / f"{self._sanitize_name(theme.name)}.json"
+            self._themes_dir.mkdir(parents=True, exist_ok=True)
+            dst = self._themes_dir / f"{self._sanitize_name(theme.name)}.json"
             src.rename(dst)
             theme.is_builtin = False
             self._custom_themes[theme.name] = theme
@@ -513,7 +539,7 @@ class ThemeManager:
 
     def delete_trashed_theme_permanently(self, filename: str) -> bool:
         """从回收站永久删除一个主题（不可恢复）。"""
-        path = TRASH_DIR / filename
+        path = self._trash_dir / filename
         try:
             if path.exists():
                 path.unlink()
@@ -523,10 +549,10 @@ class ThemeManager:
 
     def empty_trash(self) -> int:
         """永久清空回收站，返回被删的数量。"""
-        if not TRASH_DIR.exists():
+        if not self._trash_dir.exists():
             return 0
         count = 0
-        for f in TRASH_DIR.glob("*.json"):
+        for f in self._trash_dir.glob("*.json"):
             try:
                 f.unlink()
                 count += 1
@@ -558,9 +584,9 @@ class ThemeManager:
 
     def _load_custom_themes(self):
         """启动时加载 themes/ 目录下的自定义主题。"""
-        if not THEMES_DIR.exists():
+        if not self._themes_dir.exists():
             return
-        for f in THEMES_DIR.glob("*.json"):
+        for f in self._themes_dir.glob("*.json"):
             try:
                 with open(f, "r", encoding="utf-8") as fp:
                     data = json.load(fp)
@@ -572,7 +598,7 @@ class ThemeManager:
 
     def _write_theme_file(self, theme: Theme) -> bool:
         """把 theme 写到 themes/<name>.json。"""
-        path = THEMES_DIR / f"{self._sanitize_name(theme.name)}.json"
+        path = self._themes_dir / f"{self._sanitize_name(theme.name)}.json"
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(theme.to_dict(), f, ensure_ascii=False, indent=2)
@@ -584,18 +610,39 @@ class ThemeManager:
     def _move_to_trash(self, path: Path) -> bool:
         """把 themes/ 下的文件移到 themes/.trash/，文件名加时间戳防冲突。"""
         try:
-            TRASH_DIR.mkdir(parents=True, exist_ok=True)
+            self._trash_dir.mkdir(parents=True, exist_ok=True)
             ts = int(time.time())
-            dst = TRASH_DIR / f"{path.stem}_{ts}{path.suffix}"
+            dst = self._trash_dir / f"{path.stem}_{ts}{path.suffix}"
             # 极端情况下同一秒冲突
             while dst.exists():
                 ts += 1
-                dst = TRASH_DIR / f"{path.stem}_{ts}{path.suffix}"
+                dst = self._trash_dir / f"{path.stem}_{ts}{path.suffix}"
             path.rename(dst)
             return True
         except Exception as e:
             print(f"[theme] 移到回收站失败: {e}")
             return False
+
+    def _migrate_legacy_themes(self) -> None:
+        source = self._legacy_themes_dir
+        if source is None or not source.exists():
+            return
+        try:
+            if source.resolve() == self._themes_dir.resolve():
+                return
+        except OSError:
+            return
+        self._themes_dir.mkdir(parents=True, exist_ok=True)
+        for path in source.glob("*.json"):
+            destination = self._themes_dir / path.name
+            if destination.exists():
+                continue
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    Theme.from_dict(json.load(handle))
+                shutil.copy2(path, destination)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                continue
 
     @staticmethod
     def _sanitize_name(name: str) -> str:

@@ -181,6 +181,23 @@ class SkinRenderer:
         finally:
             self._current_time = previous
 
+    def get_skin_bounds(
+        self,
+        canvas_w: int,
+        canvas_h: int,
+        plane: Optional[LayerPlane] = None,
+    ) -> QRectF:
+        bounds: Optional[QRectF] = None
+        for layer in self._skin.layers:
+            if not layer.visible or (plane is not None and layer.plane != plane):
+                continue
+            polygon = self.get_layer_polygon(layer, canvas_w, canvas_h)
+            if polygon.isEmpty():
+                continue
+            layer_bounds = polygon.boundingRect()
+            bounds = layer_bounds if bounds is None else bounds.united(layer_bounds)
+        return bounds or QRectF()
+
     def layer_at(
         self,
         point: QPointF,

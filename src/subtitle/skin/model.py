@@ -568,5 +568,22 @@ class SkinDefinition:
 
     @classmethod
     def load(cls, path: Path) -> "SkinDefinition":
-        with path.open("r", encoding="utf-8") as handle:
-            return cls.from_dict(json.load(handle))
+        path = Path(path)
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise ValueError(f"无法读取皮肤定义文件：{path}") from error
+        if not raw.strip():
+            raise ValueError(f"皮肤定义文件为空：{path}")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"皮肤定义不是有效 JSON：{path}（第 {error.lineno} 行，第 {error.colno} 列）"
+            ) from error
+        if not isinstance(data, dict):
+            raise ValueError(f"皮肤定义根节点必须是对象：{path}")
+        try:
+            return cls.from_dict(data)
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"皮肤定义结构无效：{path}（{error}）") from error

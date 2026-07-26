@@ -25,7 +25,7 @@ from .model import (
 )
 from .package import (
     create_skin_directory, export_skin_package, import_skin_package,
-    peek_skin_package, safe_name, skins_root,
+    list_skin_directories, peek_skin_package, safe_name, skins_root,
 )
 
 
@@ -55,6 +55,7 @@ class LayerPanel(QWidget):
         self.list.setDragDropMode(QAbstractItemView.InternalMove)
         self.list.setDefaultDropAction(Qt.MoveAction)
         self.list.currentItemChanged.connect(self._selected)
+        self.list.itemClicked.connect(self._clicked)
         self.list.itemChanged.connect(self._item_changed)
         self.list.model().rowsMoved.connect(lambda *args: self._sync_order())
         layout.addWidget(self.list)
@@ -89,10 +90,17 @@ class LayerPanel(QWidget):
                 self.list.setCurrentItem(item)
                 return
 
+    def clear_selection(self) -> None:
+        self.list.setCurrentItem(None)
+        self.list.clearSelection()
+
     def _selected(self, current, previous) -> None:
         del previous
         if current:
             self.selected.emit(current.data(Qt.UserRole))
+
+    def _clicked(self, item: QListWidgetItem) -> None:
+        self.selected.emit(item.data(Qt.UserRole))
 
     def _item_changed(self, item: QListWidgetItem) -> None:
         if self._refreshing:
@@ -675,18 +683,21 @@ class SkinEditorWindow(QMainWindow):
         self.current_time = 0.0
         self._history = [self.skin.to_dict()]
         self._history_index = 0
+        self._saved_snapshot = self.skin.to_dict()
         self._editing = False
+        self._selector_updating = False
         self.setWindowTitle("字幕皮肤编辑器")
         self.resize(1380, 900)
         self._init_ui()
         self._init_toolbar()
+        self._refresh_skin_selector()
         self._mirror_timer = QTimer(self)
         self._mirror_timer.setSingleShot(True)
         self._mirror_timer.setInterval(100)
         self._mirror_timer.timeout.connect(self._refresh_mirror)
         self._connect()
         self._refresh_mirror()
-        self.statusBar().showMessage(f"皮肤目录：{self.base_dir}")
+        self._update_editor_identity()
 
     def _init_ui(self) -> None:
         central = QWidget()
@@ -733,6 +744,13 @@ class SkinEditorWindow(QMainWindow):
         self._toolbar_action(toolbar, "保存", self._save, QKeySequence.Save)
         self._toolbar_action(toolbar, "导入包", self._import_package)
         self._toolbar_action(toolbar, "导出包", self._export_package)
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel("正在编辑："))
+        self.skin_selector = QComboBox()
+        self.skin_selector.setMinimumWidth(220)
+        self.skin_selector.setToolTip("切换当前正在编辑的字幕皮肤")
+        self.skin_selector.currentIndexChanged.connect(self._on_skin_selector_changed)
+        toolbar.addWidget(self.skin_selector)
         toolbar.addSeparator()
         self._toolbar_action(toolbar, "撤销", self._undo, QKeySequence.Undo)
         self._toolbar_action(toolbar, "重做", self._redo, QKeySequence.Redo)
@@ -792,10 +810,12 @@ class SkinEditorWindow(QMainWindow):
     def _commit_history(self) -> None:
         snapshot = self.skin.to_dict()
         if snapshot == self._history[self._history_index]:
+            self._update_editor_identity()
             return
         self._history = self._history[:self._history_index + 1]
         self._history.append(snapshot)
         self._history_index += 1
+        self._update_editor_identity()
 
     def _undo(self) -> None:
         if self._history_index <= 0:
@@ -814,6 +834,96 @@ class SkinEditorWindow(QMainWindow):
         action_id = self.current_action.id if self.current_action else ""
         self.skin = SkinDefinition.from_dict(snapshot)
         self._refresh_all(layer_id, action_id)
+        self._update_editor_identity()
+
+    def _is_dirty(self) -> bool:
+        return self._draft_temp is not None or self.skin.to_dict() != self._saved_snapshot
+
+    def _update_editor_identity(self) -> None:
+        dirty = " *" if self._is_dirty() else ""
+        self.setWindowTitle(f"字幕皮肤编辑器 — {self.skin.name}{dirty}")
+        state = "未保存" if self._is_dirty() else "已保存"
+        self.statusBar().showMessage(
+            f"当前皮肤：{self.skin.name}（{state}）｜目录：{self.base_dir}"
+        )
+
+    def _refresh_skin_selector(self) -> None:
+        if not hasattr(self, "skin_selector"):
+            return
+        current_path = self.base_dir.resolve()
+        entries: list[tuple[str, str]] = []
+        found_current = False
+        for directory in list_skin_directories(self.root):
+            try:
+                skin = SkinDefinition.load(directory / "skin.json")
+            except Exception:
+                continue
+            label = skin.name if skin.name == directory.name else f"{skin.name} [{directory.name}]"
+            entries.append((label, str(directory)))
+            if directory.resolve() == current_path:
+                found_current = True
+        if not found_current:
+            suffix = "（未保存草稿）" if self._draft_temp is not None else "（外部文件）"
+            entries.insert(0, (f"{self.skin.name}{suffix}", str(self.base_dir)))
+        self._selector_updating = True
+        self.skin_selector.clear()
+        current_index = 0
+        for index, (label, path) in enumerate(entries):
+            self.skin_selector.addItem(label, path)
+            if Path(path).resolve() == current_path:
+                current_index = index
+        self.skin_selector.setCurrentIndex(current_index)
+        self._selector_updating = False
+
+    def _confirm_replace_current(self) -> bool:
+        if not self._is_dirty():
+            return True
+        answer = QMessageBox.warning(
+            self,
+            "当前皮肤尚未保存",
+            f"皮肤“{self.skin.name}”有未保存修改，切换前是否保存？",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if answer == QMessageBox.Cancel:
+            return False
+        if answer == QMessageBox.Save:
+            return self._save()
+        return True
+
+    def _load_editor_skin(self, directory: Path) -> None:
+        directory = Path(directory)
+        definition_path = directory if directory.is_file() else directory / "skin.json"
+        loaded = SkinDefinition.load(definition_path)
+        self._discard_draft()
+        self.skin = loaded
+        self.base_dir = definition_path.parent
+        self.current_action = None
+        self.current_layer = None
+        self._history = [self.skin.to_dict()]
+        self._history_index = 0
+        self._saved_snapshot = self.skin.to_dict()
+        self._refresh_all()
+        self._refresh_skin_selector()
+        self._update_editor_identity()
+
+    def _on_skin_selector_changed(self, index: int) -> None:
+        if self._selector_updating or index < 0:
+            return
+        value = self.skin_selector.itemData(index)
+        if not value:
+            return
+        directory = Path(value)
+        if directory.resolve() == self.base_dir.resolve():
+            return
+        if not self._confirm_replace_current():
+            self._refresh_skin_selector()
+            return
+        try:
+            self._load_editor_skin(directory)
+        except Exception as error:
+            QMessageBox.warning(self, "切换皮肤失败", str(error))
+            self._refresh_skin_selector()
 
     def _refresh_all(self, layer_id: str = "", action_id: str = "") -> None:
         self.layer_panel.set_skin(self.skin)
@@ -837,6 +947,7 @@ class SkinEditorWindow(QMainWindow):
         width, height = self.panel.get_window_size()
         if self.skin.design_width <= 1 or self.skin.design_height <= 1:
             self.skin.design_width, self.skin.design_height = width, height
+        self.canvas.set_viewport_size(width, height)
         self.canvas.set_background(self.panel.grab_skin_background())
 
     def _model_changed(self) -> None:
@@ -874,6 +985,8 @@ class SkinEditorWindow(QMainWindow):
         self.canvas.select_layer(layer_id or None)
         if layer_id and self.layer_panel.selected_id() != layer_id:
             self.layer_panel.select(layer_id)
+        elif not layer_id:
+            self.layer_panel.clear_selection()
         self.timeline.set_context(self.current_action, self.current_layer)
         self.timeline.set_time(self.current_time)
         self.properties.set_context(self.current_layer, self.current_action, self.current_time)
@@ -1078,6 +1191,8 @@ class SkinEditorWindow(QMainWindow):
             self.runtime.triggers.fire_for_test(trigger_id)
 
     def _new_skin(self) -> None:
+        if not self._confirm_replace_current():
+            return
         name, ok = QInputDialog.getText(self, "新建皮肤", "皮肤名称", text="新皮肤")
         if not ok or not name.strip():
             return
@@ -1091,30 +1206,29 @@ class SkinEditorWindow(QMainWindow):
         self.current_layer = None
         self._history = [self.skin.to_dict()]
         self._history_index = 0
+        self._saved_snapshot = self.skin.to_dict()
         self._refresh_all()
+        self._refresh_skin_selector()
+        self._update_editor_identity()
 
     def _open_skin(self) -> None:
+        if not self._confirm_replace_current():
+            return
         path, _ = QFileDialog.getOpenFileName(
             self, "打开皮肤", str(self.root), "皮肤定义 (skin.json *.json)"
         )
         if not path:
             return
         try:
-            loaded = SkinDefinition.load(Path(path))
-            self._discard_draft()
-            self.skin = loaded
-            self.base_dir = Path(path).parent
-            self._history = [self.skin.to_dict()]
-            self._history_index = 0
-            self._refresh_all()
+            self._load_editor_skin(Path(path))
         except Exception as error:
             QMessageBox.warning(self, "打开失败", str(error))
 
-    def _save(self) -> None:
+    def _save(self) -> bool:
         errors = self.skin.validate()
         if errors:
             QMessageBox.warning(self, "皮肤引用错误", "\n".join(errors))
-            return
+            return False
         if self._draft_temp is not None:
             draft_directory = self.base_dir
             destination = create_skin_directory(self.root, self.skin)
@@ -1138,9 +1252,15 @@ class SkinEditorWindow(QMainWindow):
         self._original_skin = SkinDefinition.from_dict(self.skin.to_dict())
         self._original_base_dir = self.base_dir
         self._preview_applied = False
+        self._saved_snapshot = self.skin.to_dict()
+        self._refresh_skin_selector()
+        self._update_editor_identity()
         self.statusBar().showMessage(f"已保存并应用：{self.base_dir / 'skin.json'}")
+        return True
 
     def _import_package(self) -> None:
+        if not self._confirm_replace_current():
+            return
         path, _ = QFileDialog.getOpenFileName(self, "导入皮肤包", "", "皮肤包 (*.zip)")
         if not path:
             return
@@ -1158,13 +1278,7 @@ class SkinEditorWindow(QMainWindow):
                     return
                 overwrite = answer == QMessageBox.Yes
             directory = import_skin_package(Path(path), self.root, overwrite=overwrite)
-            loaded = SkinDefinition.load(directory / "skin.json")
-            self._discard_draft()
-            self.skin = loaded
-            self.base_dir = directory
-            self._history = [self.skin.to_dict()]
-            self._history_index = 0
-            self._refresh_all()
+            self._load_editor_skin(directory)
         except Exception as error:
             QMessageBox.warning(self, "导入失败", str(error))
 

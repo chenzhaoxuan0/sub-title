@@ -5,7 +5,9 @@ import zipfile
 from pathlib import Path
 
 from subtitle.skin.model import AssetType, Layer, SkinDefinition
-from subtitle.skin.package import export_skin_package, import_skin_package
+from subtitle.skin.package import (
+    export_skin_package, import_skin_package, list_skin_directories,
+)
 
 
 class SkinPackageTests(unittest.TestCase):
@@ -42,6 +44,19 @@ class SkinPackageTests(unittest.TestCase):
                 output.writestr("../escape.png", b"bad")
             with self.assertRaises(ValueError):
                 import_skin_package(archive, Path(temporary) / "installed")
+
+    def test_invalid_skin_json_is_excluded_from_discovery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            valid = root / "valid"
+            invalid = root / "invalid"
+            valid.mkdir()
+            invalid.mkdir()
+            SkinDefinition(name="valid").save(valid / "skin.json")
+            (invalid / "skin.json").write_text("", encoding="utf-8")
+            self.assertEqual(list_skin_directories(root), [valid])
+            with self.assertRaisesRegex(ValueError, "文件为空"):
+                SkinDefinition.load(invalid / "skin.json")
 
 
 if __name__ == "__main__":

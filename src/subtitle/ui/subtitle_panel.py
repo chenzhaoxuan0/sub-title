@@ -18,8 +18,8 @@ v4 新增：
 from __future__ import annotations
 
 import platform
-from PySide6.QtCore import Qt, QPoint, QPointF, QTimer, Signal, QEvent
-from PySide6.QtGui import QFont, QTextCursor, QMouseEvent, QPainter, QColor
+from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QTimer, Signal, QEvent
+from PySide6.QtGui import QFont, QTextCursor, QMouseEvent, QPainter, QColor, QCursor, QRegion
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton,
     QLabel, QComboBox, QSizeGrip, QSlider, QSpinBox, QFontComboBox,
@@ -32,6 +32,7 @@ from .theme_engine import Theme, ThemeManager, get_theme_manager
 
 
 IS_MAC = platform.system() == "Darwin"
+IS_WINDOWS = platform.system() == "Windows"
 
 
 # 全局：记录当前是否有弹窗控件处于打开状态
@@ -100,6 +101,131 @@ class OverlayLayer(QWidget):
             painter.setRenderHint(QPainter.SmoothPixmapTransform)
             self._renderer.render(painter, self.width(), self.height(), self.plane)
             painter.end()
+
+
+class SkinExtensionWindow(QWidget):
+    """Draw only the skin pixels outside the subtitle content rectangle."""
+
+    def __init__(self, panel):
+        flags = Qt.Tool | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus
+        if not IS_WINDOWS:
+            transparent_input = getattr(Qt, "WindowTransparentForInput", None)
+            if transparent_input is not None:
+                flags |= transparent_input
+        super().__init__(panel, flags)
+        self.panel = panel
+        self._runtime = None
+        self._renderer = None
+        self._paint_origin = QPointF()
+        self._content_clip = QRect()
+        self._protected_ui_region = QRegion()
+        self._canvas_width = 1
+        self._canvas_height = 1
+        self.setObjectName("skin_extension")
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, not IS_WINDOWS)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+
+    def set_runtime(self, runtime) -> None:
+        self._runtime = runtime
+        self._renderer = runtime.renderer if runtime is not None else None
+        self.sync_geometry()
+
+    def sync_geometry(self) -> None:
+        if self._renderer is None or not self.panel.isVisible():
+            self.hide()
+            return
+        width = max(1, self.panel.container.width())
+        height = max(1, self.panel.container.height())
+        content = QRectF(0, 0, width, height)
+        bounds = self._renderer.get_skin_bounds(width, height)
+        if bounds.isEmpty() or content.contains(bounds):
+            self.hide()
+            return
+        window_rect = bounds.adjusted(-2, -2, 2, 2).toAlignedRect()
+        if window_rect.isEmpty():
+            self.hide()
+            return
+        content_origin = self.panel.container.mapToGlobal(QPoint(0, 0))
+        self._paint_origin = QPointF(-window_rect.left(), -window_rect.top())
+        self._content_clip = QRect(
+            -window_rect.left(), -window_rect.top(), width, height
+        )
+        self._canvas_width = width
+        self._canvas_height = height
+        geometry = QRect(
+            content_origin.x() + window_rect.left(),
+            content_origin.y() + window_rect.top(),
+            window_rect.width(),
+            window_rect.height(),
+        )
+        panel_origin = self.panel.mapToGlobal(QPoint(0, 0))
+        self._protected_ui_region = QRegion(QRect(
+            panel_origin.x() - geometry.x(),
+            panel_origin.y() - geometry.y(),
+            self.panel.width(),
+            self.panel.height(),
+        ))
+        if self.geometry() != geometry:
+            self.setGeometry(geometry)
+        if not self.isVisible():
+            self.show()
+            self.raise_()
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        del event
+        if self._renderer is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        outside = QRegion(self.rect()).subtracted(self._protected_ui_region)
+        painter.setClipRegion(outside)
+        painter.translate(self._paint_origin)
+        self._renderer.render(painter, self._canvas_width, self._canvas_height)
+        painter.end()
+
+    def _layer_at_local(self, point: QPointF):
+        if self._renderer is None or self._protected_ui_region.contains(point.toPoint()):
+            return None
+        scene_point = point - self._paint_origin
+        if self._runtime is not None and hasattr(self._runtime, "hit_test"):
+            return self._runtime.hit_test(
+                scene_point, self._canvas_width, self._canvas_height
+            )
+        return self._renderer.layer_at(
+            scene_point, self._canvas_width, self._canvas_height, alpha_test=True
+        )
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        layer = self._layer_at_local(event.position())
+        button_names = {
+            Qt.LeftButton: "left", Qt.RightButton: "right", Qt.MiddleButton: "middle",
+        }
+        button_name = button_names.get(event.button())
+        if layer is not None and button_name and self._runtime is not None:
+            self.panel.skin_clicked.emit(layer.id, button_name)
+            if hasattr(self._runtime, "on_layer_clicked"):
+                self._runtime.on_layer_clicked(layer.id, button_name)
+        if event.button() == Qt.RightButton:
+            self.panel.context_menu_requested.emit(event.globalPosition().toPoint())
+        event.accept()
+
+    def nativeEvent(self, event_type, message):
+        if IS_WINDOWS:
+            try:
+                import ctypes
+                import ctypes.wintypes
+                native_message = ctypes.wintypes.MSG.from_address(int(message))
+                if native_message.message == 0x0084:
+                    local = self.mapFromGlobal(QCursor.pos())
+                    if self._layer_at_local(QPointF(local)) is None:
+                        return True, -1
+                    return True, 1
+            except (TypeError, ValueError, OSError):
+                pass
+        return super().nativeEvent(event_type, message)
 
 
 class SubtitlePanel(QWidget):
@@ -188,6 +314,7 @@ class SubtitlePanel(QWidget):
         # 字幕上层贴图：耳朵、尾巴和前景装饰。
         self.overlay_layer = OverlayLayer("above_text", self.container)
         self.overlay_layer.setObjectName("skin_overlay")
+        self.skin_extension = SkinExtensionWindow(self)
 
         # ---- 工具栏 ----
         self.toolbar = QWidget(self)
@@ -604,6 +731,7 @@ class SubtitlePanel(QWidget):
             self.preview_state_changed.emit()
         self.pin_btn.setText("📌 已置顶" if pinned else "📌 未置顶")
         self.ui_cfg.always_on_top = pinned
+        self.skin_extension.sync_geometry()
         self._notify_geometry()
 
     # ---------- 悬停显隐 ----------
@@ -657,6 +785,11 @@ class SubtitlePanel(QWidget):
         if self._drag_offset is not None:
             self._drag_offset = None
             self._notify_geometry()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if hasattr(self, "skin_extension"):
+            self.skin_extension.sync_geometry()
 
     def wheelEvent(self, e):
         bar = self.view.verticalScrollBar()
@@ -714,6 +847,8 @@ class SubtitlePanel(QWidget):
             self.overlay_layer.setGeometry(0, 0, content_w, content_h)
             # 状态栏 + 缩放手柄：浮在 container 底部（不占 view 空间）
             self._layout_bottom_overlay(content_w, content_h)
+            if hasattr(self, "skin_extension"):
+                self.skin_extension.sync_geometry()
         finally:
             self._laying_out = False
 
@@ -895,16 +1030,19 @@ class SubtitlePanel(QWidget):
 
     def _do_hide(self):
         self._notify_geometry()
+        self.skin_extension.hide()
         self.hide()
         self.hide_requested.emit()
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.skin_extension.sync_geometry()
         if self._skin_runtime:
             self._skin_runtime.on_window_shown()
 
     def hideEvent(self, event):
         super().hideEvent(event)
+        self.skin_extension.hide()
         if self._skin_runtime:
             self._skin_runtime.on_window_hidden()
 
@@ -948,11 +1086,13 @@ class SubtitlePanel(QWidget):
         self._skin_runtime = runtime
         self.underlay_layer.set_runtime(runtime)
         self.overlay_layer.set_runtime(runtime)
+        self.skin_extension.set_runtime(runtime)
         self.update_skin_layers()
 
     def update_skin_layers(self):
         self.underlay_layer.update()
         self.overlay_layer.update()
+        self.skin_extension.sync_geometry()
 
     def grab_skin_background(self):
         if self._grabbing_skin_background:
@@ -1023,7 +1163,11 @@ class SubtitlePanel(QWidget):
         w = max(self.minimumWidth(), int(w))
         h = max(self.minimumHeight(), int(h))
         self._content_h = h
+        toolbar_height = self.toolbar.sizeHint().height() if self.toolbar.isVisible() else 0
+        self.resize(w, h + toolbar_height)
         self._layout_window()
+        if not self._grabbing_skin_background:
+            self.preview_state_changed.emit()
         self._notify_geometry()
 
     def set_lock_scroll(self, locked: bool):
