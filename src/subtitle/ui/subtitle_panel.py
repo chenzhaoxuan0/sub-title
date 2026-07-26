@@ -288,9 +288,28 @@ class SubtitlePanel(QWidget):
         self._content_h = self.ui_cfg.win_h or 150
         self.resize(self.ui_cfg.win_w or 760, self._content_h)
         if self.ui_cfg.win_x is not None and self.ui_cfg.win_y is not None:
-            self.move(self.ui_cfg.win_x, self.ui_cfg.win_y)
+            # 检查保存的位置是否在可见屏幕内，不在则忽略（用默认位置）
+            # 避免：切换显示器配置后窗口跑到屏幕外看不见
+            if self._pos_on_any_screen(self.ui_cfg.win_x, self.ui_cfg.win_y):
+                self.move(self.ui_cfg.win_x, self.ui_cfg.win_y)
+            else:
+                print(f"[ui] 保存的窗口位置 ({self.ui_cfg.win_x},{self.ui_cfg.win_y}) "
+                      f"不在任何屏幕内，使用默认位置")
         self._layout_window()
         self._update_toolbar_compact()
+
+    @staticmethod
+    def _pos_on_any_screen(x: int, y: int) -> bool:
+        """检查 (x,y) 是否在任一屏幕的可用区域内。"""
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is None:
+            return True  # 没有 app 无法判断，保守认为可见
+        for screen in app.screens():
+            g = screen.availableGeometry()
+            if g.x() <= x < g.x() + g.width() and g.y() <= y < g.y() + g.height():
+                return True
+        return False
 
     # ---------- 主题 ----------
     def _apply_theme(self):
