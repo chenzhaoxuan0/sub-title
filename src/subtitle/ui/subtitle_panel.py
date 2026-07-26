@@ -661,7 +661,13 @@ class SubtitlePanel(QWidget):
 
     # ---------- 对外接口 ----------
     def emit_text(self, text: str, is_final: bool):
-        """累积到 buffer，16ms 定时器到点一次性 flush（节流，避免每 token relayout）。"""
+        """跨线程安全：只 emit 信号。Qt 会用 QueuedConnection 把调用送到主线程。
+        绝不能在这里直接操作 QTimer/QWidget（它们属于主线程），否则 PySide6 报
+        'startTimer from another thread'。"""
+        self._text_appended.emit(text, is_final)
+
+    def _on_text_appended(self, text: str, is_final: bool):
+        """主线程槽：累积到 buffer + 节流 flush（这里操作 QTimer 安全）。"""
         self._pending_text += text
         if is_final:
             self._pending_has_final = True
@@ -675,13 +681,13 @@ class SubtitlePanel(QWidget):
         text = self._pending_text
         self._pending_text = ""
         self._pending_has_final = False
-        self._on_text_appended(text, False)
+        self._insert_text(text)
 
     def set_status(self, text: str, color: str | None = None):
         self.status_label.setText(text)
 
-    # ---------- 字幕追加 ----------
-    def _on_text_appended(self, text: str, is_final: bool):
+    # ---------- 字幕插入文档（实际渲染，主线程）----------
+    def _insert_text(self, text: str):
         bar = self.view.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - bar.singleStep()
         saved_pos = bar.value()

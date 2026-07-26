@@ -28,8 +28,8 @@ ui:
   max_chars: 20000
   theme: Dark
   always_on_top: true
-  win_x: 1954
-  win_y: 1779
+  win_x: 146
+  win_y: 1181
   win_w: 1344
   win_h: 246
   close_action: ask
