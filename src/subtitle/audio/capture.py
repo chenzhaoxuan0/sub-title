@@ -14,7 +14,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-import soundcard as sc
+
+# 注意：soundcard 的 mediafoundation 后端在 import 时会调 CoInitialize/CoInitializeEx
+# 初始化当前线程的 COM（_com = _COMLibrary() 是模块级全局）。
+# 如果在主线程（QApplication 所在）import，会导致 PySide6 的 OleInitialize 冲突
+# （RPC_E_CHANGED_MODE 0x80010106）。所以改成延迟 import——只在采集线程里 import。
 
 
 @dataclass
@@ -25,7 +29,8 @@ class CaptureDeviceInfo:
 
 
 def list_loopback_devices() -> list[CaptureDeviceInfo]:
-    """列出可用 loopback 源。"""
+    """列出可用 loopback 源。延迟 import soundcard（避免主线程 COM 初始化冲突）。"""
+    import soundcard as sc
     default_spk = sc.default_speaker().name
     out: list[CaptureDeviceInfo] = []
     for m in sc.all_microphones(include_loopback=True):
@@ -39,7 +44,8 @@ def list_loopback_devices() -> list[CaptureDeviceInfo]:
 
 
 def _find_loopback(speaker_name_hint: Optional[str] = None):
-    """选定 loopback 设备：优先匹配提示名，否则用默认输出的 loopback。"""
+    """选定 loopback 设备：优先匹配提示名，否则用默认输出的 loopback。延迟 import。"""
+    import soundcard as sc
     mics = sc.all_microphones(include_loopback=True)
     if speaker_name_hint:
         for m in mics:
