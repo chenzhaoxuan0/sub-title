@@ -31,3 +31,7 @@ dist/
 
 # 用户运行时主题目录（运行 app 后自动产生）
 themes/
+
+# 用户配置 + 凭证（运行时数据，绝不入库）
+config.yaml
+credentials.json

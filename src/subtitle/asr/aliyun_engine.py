@@ -39,14 +39,18 @@ class AliyunEngine(AsrEngine):
 
     def load(self) -> None:
         import nls
+        from .. import credentials
 
-        akid = getattr(self.cfg, "aliyun_access_key_id", "")
-        aksecret = getattr(self.cfg, "aliyun_access_key_secret", "")
-        appkey = getattr(self.cfg, "aliyun_appkey", "")
+        # AccessKey / Secret / AppKey 不再从 config.yaml 读，改从系统 keyring
+        # （Windows Credential Manager / macOS Keychain / Linux Secret Service）。
+        creds = credentials.get_aliyun()
+        akid = creds.get(credentials.KEY_ALIYUN_AK_ID, "")
+        aksecret = creds.get(credentials.KEY_ALIYUN_AK_SECRET, "")
+        appkey = creds.get(credentials.KEY_ALIYUN_APPKEY, "")
         if not akid or not aksecret or not appkey:
             raise ValueError(
                 "阿里云凭证未配置。请在设置里填 AccessKey ID/Secret/AppKey，"
-                "或手改 config.yaml 的 asr.aliyun_* 字段。"
+                "凭证会存到系统保险箱（" + credentials.storage_location() + "）。"
             )
 
         print("[aliyun] 获取 token...")

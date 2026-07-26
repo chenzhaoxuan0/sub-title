@@ -16,6 +16,13 @@ PySide6
 # 配置
 PyYAML
 
+# 跨平台用户目录（%APPDATA% / ~/Library/Application Support / ~/.config）
+platformdirs
+
+# 操作系统级凭证保险箱（Windows Credential Manager / macOS Keychain / Linux Secret Service）
+# 用于存阿里云 AccessKey 等敏感信息，绝不放进 config.yaml
+keyring
+
 # ============================================================
 # 重要：torch / torchaudio 不能用本文件直接装！
 # 若直接 `pip install -r requirements.txt`，pip 会从默认 PyPI 装 CPU 版。

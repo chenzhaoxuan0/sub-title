@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import Config
+from .. import credentials
 from .theme_engine import (
     Theme, ThemeColors, ThemeGeometry, ThemeManager,
     get_theme_manager, BUILTIN_THEMES, PROTECTED_THEMES,
@@ -28,6 +29,7 @@ from .fluent_widgets import (
     SettingCard, SettingCardGroup, ToggleSwitch, build_fluent_qss,
 )
 from .trash_dialog import TrashDialog
+from .flow_layout import FlowLayout
 
 
 # ------------------------------------------------------------------
@@ -216,7 +218,12 @@ class SettingsDialog(QDialog):
         self.aliyun_appkey_edit = QLineEdit()
         self.aliyun_appkey_edit.setPlaceholderText("AppKey")
         ap.addWidget(_row("AppKey", "智能语音交互项目 AppKey", self.aliyun_appkey_edit))
-        hint = QLabel("凭证存于本地 config.yaml，不上传；需先装 nls SDK（见 README）")
+        # 提示：凭证会存到系统保险箱（不再写进 config.yaml）
+        cred_location = credentials.storage_location()
+        hint = QLabel(
+            f"🔐 凭证存于系统保险箱（{cred_location}），不进 config.yaml。\n"
+            f"卸载重装或换电脑需要重新填；需先装 nls SDK（见 README）。"
+        )
         hint.setStyleSheet("color: #888; font-size: 11px;")
         hint.setWordWrap(True)
         ap.addWidget(hint)
@@ -247,10 +254,12 @@ class SettingsDialog(QDialog):
         tr.addWidget(self.theme_combo)
         tr.addWidget(self.theme_preview_btn)
         g_theme.add_card(_row("预设主题", "选择内置或自定义主题", theme_row))
-        # 主题管理按钮
+        # 主题管理按钮 —— 用 FlowLayout 自动换行，避免一行 8 个按钮挤不下
         mgmt = QWidget()
-        mr = QHBoxLayout(mgmt)
-        mr.setContentsMargins(0, 0, 0, 0)
+        # 显式声明横竖都 Expanding：父布局（SettingCard 的 QHBoxLayout）会给我们尽量多的空间，
+        # FlowLayout 才能真的把多行按钮排开
+        mgmt.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        flow = FlowLayout(mgmt, margin=0, h_spacing=6, v_spacing=6)
         self.new_theme_btn = QPushButton("➕ 新建")
         self.new_theme_btn.setToolTip("从空白默认值创建一个全新的自定义主题")
         self.new_theme_btn.clicked.connect(self._on_new_theme)
@@ -276,7 +285,7 @@ class SettingsDialog(QDialog):
         for b in (self.new_theme_btn, self.save_theme_btn, self.rename_theme_btn,
                   self.reset_theme_btn, self.import_theme_btn, self.export_theme_btn,
                   self.delete_theme_btn, self.trash_btn):
-            mr.addWidget(b)
+            flow.addWidget(b)
         g_theme.add_card(_row("主题管理",
                               "新建/保存/重命名/恢复默认/导入/导出/删除/回收站（基础黑白主题不可删）",
                               mgmt))
@@ -331,6 +340,11 @@ class SettingsDialog(QDialog):
         # 字体
         g_font = SettingCardGroup("字体")
         self.font_combo = QFontComboBox()
+        # 关键：明确禁掉可编辑。否则对不存在的字体名（如变量字体 "MiSans VF Normal"），
+        # 看起来就像一个需要手动输入的文本框，用户不知道要点 ▼ 下拉。
+        self.font_combo.setEditable(False)
+        self.font_combo.setToolTip("点击 ▼ 下拉选择系统已安装的字体")
+        self.font_combo.setMinimumWidth(220)
         g_font.add_card(_row("字体", "字幕字体", self.font_combo))
         self.font_size_spin = QSpinBox()
         self.font_size_spin.setRange(8, 72)
@@ -358,10 +372,11 @@ class SettingsDialog(QDialog):
         sr = QHBoxLayout(size_row)
         sr.setContentsMargins(0, 0, 0, 0)
         self.win_w_spin = QSpinBox()
-        self.win_w_spin.setRange(self.panel.minimumWidth(), 4000)
+        # 下限 30：用户可以让字幕窗口缩到非常小，贴进视频网站的小角落
+        self.win_w_spin.setRange(max(self.panel.minimumWidth(), 30), 4000)
         self.win_w_spin.setSuffix(" px")
         self.win_h_spin = QSpinBox()
-        self.win_h_spin.setRange(self.panel.minimumHeight(), 4000)
+        self.win_h_spin.setRange(max(self.panel.minimumHeight(), 30), 4000)
         self.win_h_spin.setSuffix(" px")
         sr.addWidget(self.win_w_spin)
         sr.addWidget(self.win_h_spin)
@@ -486,9 +501,9 @@ class SettingsDialog(QDialog):
         self.sv_device_combo.setCurrentIndex(
             max(0, self.sv_device_combo.findData(asr.sensevoice_device)))
         self.sv_segment_spin.setValue(asr.sensevoice_segment_seconds)
-        self.aliyun_akid_edit.setText(asr.aliyun_access_key_id)
-        self.aliyun_aksecret_edit.setText(asr.aliyun_access_key_secret)
-        self.aliyun_appkey_edit.setText(asr.aliyun_appkey)
+        self.aliyun_akid_edit.setText(credentials.get(credentials.KEY_ALIYUN_AK_ID) or "")
+        self.aliyun_aksecret_edit.setText(credentials.get(credentials.KEY_ALIYUN_AK_SECRET) or "")
+        self.aliyun_appkey_edit.setText(credentials.get(credentials.KEY_ALIYUN_APPKEY) or "")
 
         # 外观
         current_theme = self.panel.get_theme()
@@ -816,9 +831,12 @@ class SettingsDialog(QDialog):
         asr.device = self.funasr_device_combo.currentData()
         asr.sensevoice_device = self.sv_device_combo.currentData()
         asr.sensevoice_segment_seconds = self.sv_segment_spin.value()
-        asr.aliyun_access_key_id = self.aliyun_akid_edit.text().strip()
-        asr.aliyun_access_key_secret = self.aliyun_aksecret_edit.text().strip()
-        asr.aliyun_appkey = self.aliyun_appkey_edit.text().strip()
+        # 阿里云 AccessKey ID / Secret / AppKey → 写到系统保险箱（不进 config.yaml）
+        credentials.set_aliyun(
+            ak_id=self.aliyun_akid_edit.text().strip(),
+            ak_secret=self.aliyun_aksecret_edit.text().strip(),
+            appkey=self.aliyun_appkey_edit.text().strip(),
+        )
 
         # 外观
         theme_name = self.theme_combo.currentData()

@@ -18,7 +18,7 @@ v4 新增：
 from __future__ import annotations
 
 import platform
-from PySide6.QtCore import Qt, QPoint, QTimer, Signal
+from PySide6.QtCore import Qt, QPoint, QTimer, Signal, QEvent
 from PySide6.QtGui import QFont, QTextCursor, QMouseEvent, QPainter, QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton,
@@ -102,6 +102,7 @@ class SubtitlePanel(QWidget):
     hide_requested = Signal()
     quit_requested = Signal()
     theme_changed = Signal(str)  # 主题切换信号
+    context_menu_requested = Signal(QPoint)  # 全局坐标；右键任意位置时发出
 
     def __init__(self, ui_cfg: UiConfig, on_start=None, on_stop=None, on_quit=None,
                  on_geometry_changed=None):
@@ -142,7 +143,9 @@ class SubtitlePanel(QWidget):
 
     # ---------- 初始化 ----------
     def _init_window_flags(self):
-        flags = Qt.FramelessWindowHint | Qt.Tool
+        # 注意：不加 Qt.Tool —— 否则窗口不会出现在任务栏，
+        # 用户要拿 OBS 抓取或 Alt-Tab 切换就找不到。
+        flags = Qt.FramelessWindowHint
         if self.ui_cfg.always_on_top:
             flags |= Qt.WindowStaysOnTopHint
         self.setWindowFlags(flags)
@@ -200,8 +203,8 @@ class SubtitlePanel(QWidget):
 
         self.font_combo = _PopupFontCombo()
         self.font_combo.setCurrentFont(QFont(font_family, self._font_size))
-        self.font_combo.setToolTip("字幕字体")
-        self.font_combo.setFixedWidth(140)
+        self.font_combo.setToolTip("字幕字体（点击 ▼ 下拉选择）")
+        self.font_combo.setFixedWidth(180)
 
         # 透明度
         init_op = int(round(self.ui_cfg.window_opacity * 100))
@@ -281,10 +284,11 @@ class SubtitlePanel(QWidget):
         self.grip.setVisible(False)
 
     def _restore_geometry(self):
-        self.setMinimumSize(
-            getattr(self.ui_cfg, "min_win_w", 480),
-            getattr(self.ui_cfg, "min_win_h", 120),
-        )
+        # 最小尺寸硬编码 30x30，不读 ui_cfg.min_win_w/min_win_h。
+        # 原因：旧版本（< 30 之前）的 config.yaml 存了 min_win_w=480/min_win_h=120，
+        # 不强制覆盖的话那个老值会一直把窗口锁死在 480x120。
+        # min_win_w/h 字段保留在 UiConfig 里兼容旧文件，但实际不用。
+        self.setMinimumSize(30, 30)
         self._content_h = self.ui_cfg.win_h or 150
         self.resize(self.ui_cfg.win_w or 760, self._content_h)
         if self.ui_cfg.win_x is not None and self.ui_cfg.win_y is not None:
@@ -297,6 +301,36 @@ class SubtitlePanel(QWidget):
                       f"不在任何屏幕内，使用默认位置")
         self._layout_window()
         self._update_toolbar_compact()
+        # 装好之后再接管右键：任意子控件 / 空白处的右键都触发 context_menu_requested
+        self._setup_context_menu()
+
+    def _setup_context_menu(self):
+        """在任何位置右键都弹出托盘菜单。
+
+        思路：每个子控件都装上事件过滤器，拦 MouseButtonPress(RightButton) →
+        转发为全局 context_menu_requested 信号（带 globalPos）。
+        panel 自己用 setContextMenuPolicy(CustomContextMenu) 走 Qt 标准通道。
+        """
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_panel_context_menu)
+        # 拦截所有子控件的右键（按钮、toolbar、container、grip 等）
+        self._filtered_children = self.findChildren(QWidget)
+        for child in self._filtered_children:
+            child.installEventFilter(self)
+
+    def _on_panel_context_menu(self, pos: QPoint):
+        """panel 自身空白处的右键。"""
+        self.context_menu_requested.emit(self.mapToGlobal(pos))
+
+    def eventFilter(self, obj, event):
+        """子控件的右键 → 转发为 context_menu_requested。"""
+        if (obj in getattr(self, "_filtered_children", ())
+                and event.type() == QEvent.MouseButtonPress
+                and event.button() == Qt.RightButton):
+            # event.pos() 是 child 局部坐标；mapToGlobal 转到屏幕坐标
+            self.context_menu_requested.emit(obj.mapToGlobal(event.pos()))
+            return True  # 消费掉，不再传给 child
+        return super().eventFilter(obj, event)
 
     @staticmethod
     def _pos_on_any_screen(x: int, y: int) -> bool:
@@ -513,7 +547,8 @@ class SubtitlePanel(QWidget):
     # ---------- 置顶 ----------
     def _toggle_pin(self):
         pinned = not bool(self.windowFlags() & Qt.WindowStaysOnTopHint)
-        flags = Qt.FramelessWindowHint | Qt.Tool
+        # 注意：不加 Qt.Tool —— 否则置顶切换时窗口会从任务栏消失。
+        flags = Qt.FramelessWindowHint
         if pinned:
             flags |= Qt.WindowStaysOnTopHint
         self.setWindowFlags(flags)

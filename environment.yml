@@ -14,3 +14,5 @@ dependencies:
       - librosa
       - PySide6
       - PyYAML
+      - platformdirs
+      - keyring

@@ -1,4 +1,8 @@
-"""配置加载。从 config.yaml 读取，提供默认值兜底。"""
+"""配置加载。从 config.yaml 读取，提供默认值兜底。
+
+**config.yaml 不再存 API key**（aliyun_access_key_id / secret / appkey），
+改由 `credentials.py` 写入系统 keyring（Windows Credential Manager / macOS Keychain / Linux Secret Service）。
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -10,8 +14,21 @@ try:
 except ImportError:  # yaml 未装时给个占位，setup 后会有
     yaml = None
 
+# 旧版位置（项目根 / CWD）—— 仅供迁移逻辑识别，新代码用 default_config_path()
+_LEGACY_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
+
+def default_config_path() -> Path:
+    """当前 config.yaml 应该在的位置（用户数据目录）。
+
+    打包后这个路径才是合法的；旧版本的"项目根"路径只用于一次性迁移。
+    """
+    from .paths import config_path
+    return config_path()
+
+
+# 向后兼容：旧代码可能直接引用这个常量。新代码请用 default_config_path()。
+DEFAULT_CONFIG_PATH = default_config_path()
 
 
 @dataclass
@@ -41,9 +58,9 @@ class AsrConfig:
     sensevoice_segment_seconds: float = 2.0  # 攒段时长，越小延迟越低但易切词
 
     # ---- 阿里云 NLS API ----
-    aliyun_access_key_id: str = ""
-    aliyun_access_key_secret: str = ""
-    aliyun_appkey: str = ""
+    # 注意：AccessKey ID / Secret / AppKey 不在这里 —— 它们由 credentials 模块
+    # 存在系统 keyring 里（Windows Credential Manager / macOS Keychain / Linux libsecret）。
+    # region 不是密钥，可以放这里。
     aliyun_region: str = "cn-shanghai"
 
 
@@ -64,8 +81,8 @@ class UiConfig:
     close_action: str = "ask"
     toolbar_hide_delay_ms: int = 800
     lock_scroll_to_bottom: bool = False
-    min_win_w: int = 480
-    min_win_h: int = 120
+    min_win_w: int = 30
+    min_win_h: int = 30
     # 自定义几何（覆盖主题默认值）
     border_radius: Optional[int] = None
     padding_top: Optional[int] = None
@@ -110,9 +127,13 @@ def _build(d: dict[str, Any]) -> Config:
 
 
 def load_config(path: Optional[Path] = None) -> Config:
-    path = path or DEFAULT_CONFIG_PATH
+    path = path or default_config_path()
     if path.exists() and yaml is not None:
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         return _build(data)
     return Config()
+
+
+# 暴露老路径名给迁移逻辑用（避免 app.py 直接拼路径）
+LEGACY_CONFIG_PATH = _LEGACY_CONFIG_PATH

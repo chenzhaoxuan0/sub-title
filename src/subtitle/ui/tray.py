@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import platform
-from PySide6.QtCore import QObject, Signal, Qt
+from PySide6.QtCore import QObject, Signal, Qt, QPoint
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QPen, QBrush, QAction, QActionGroup
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu
 
@@ -239,3 +239,8 @@ class TrayController(QObject):
 
     def set_pin_state(self, pinned: bool):
         self.act_pin.setChecked(pinned)
+
+    def popup_at(self, global_pos: QPoint):
+        """在指定屏幕坐标弹出右键菜单（让字幕窗口本身也能右键触发）。"""
+        if self._menu is not None:
+            self._menu.popup(global_pos)

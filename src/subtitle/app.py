@@ -4,19 +4,79 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, Qt
 from PySide6.QtWidgets import QApplication
 
-from .config import load_config, DEFAULT_CONFIG_PATH
+from .config import load_config, DEFAULT_CONFIG_PATH, default_config_path
 from .asr import create_engine
 from .asr.base import AsrEngine
 from .pipeline import SubtitlePipeline
 from .ui import SubtitlePanel, TrayController, SettingsDialog, get_theme_manager
+from . import credentials, paths
 
 try:
     import yaml
 except ImportError:
     yaml = None
+
+
+# ============================================================
+# 启动时一次性迁移：老 config.yaml → 用户目录 + AK 字段 → keyring
+# ============================================================
+def _migrate_on_startup() -> None:
+    """首次启动检测：
+    1. 老 config.yaml（CWD / 项目根）→ 复制到用户数据目录，老文件改 .migrated 存档
+    2. 老 config.yaml（已迁移或新位置）里的 AK 字段 → 挪到系统 keyring
+    3. 同步：fallback 文件（如果存在）也清理
+    幂等：跑过一次就不会再迁。
+    """
+    new_path = paths.config_path()
+    # ---- 1) 文件迁移 ----
+    for legacy in paths.legacy_config_candidates():
+        if paths.migrate_legacy_config(legacy, new_path):
+            print(f"[startup] 迁移 {legacy} → {new_path}")
+    # 还要扫描 .migrated 备份文件
+    for backup in list(Path.cwd().glob("config.yaml.migrated*")):
+        try:
+            _extract_credentials_to_keyring(backup, clear_after=True)
+        except Exception as e:
+            print(f"[startup] 处理 {backup} 失败: {e}")
+    # ---- 2) 当前 config.yaml 里的 AK 字段（用户从老版本升级但还没点过设置）----
+    if new_path.exists():
+        try:
+            _extract_credentials_to_keyring(new_path, clear_after=True)
+        except Exception as e:
+            print(f"[startup] 检查 config.yaml 的 AK 字段失败: {e}")
+
+
+def _extract_credentials_to_keyring(yaml_path: Path, *, clear_after: bool) -> None:
+    """从 yaml 文件里抠出 AK 字段，写到 keyring。
+    如果 clear_after=True，写完后从 yaml 里删掉这些字段（避免下次再处理）。
+    """
+    if not yaml_path.exists() or yaml is None:
+        return
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception:
+        return
+    asr = data.get("asr") if isinstance(data, dict) else None
+    if not isinstance(asr, dict):
+        return
+    ak_id = asr.pop("aliyun_access_key_id", None) or ""
+    ak_secret = asr.pop("aliyun_access_key_secret", None) or ""
+    appkey = asr.pop("aliyun_appkey", None) or ""
+    if not (ak_id or ak_secret or appkey):
+        return  # 没有任何凭证，跳过
+    credentials.set_aliyun(ak_id=ak_id, ak_secret=ak_secret, appkey=appkey)
+    print(f"[startup] 已将 {yaml_path.name} 里的阿里云凭证迁移到系统保险箱"
+          f"（{credentials.storage_location()}）")
+    if clear_after:
+        try:
+            with open(yaml_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+        except Exception as e:
+            print(f"[startup] 清理 {yaml_path} 的 AK 字段失败: {e}")
 
 
 class _PipelineWorker(QObject):
@@ -55,6 +115,11 @@ class _PipelineWorker(QObject):
 
 class SubtitleApp:
     def __init__(self):
+        # 启动时做一次性迁移：
+        # 1) 老位置的 config.yaml（项目根 / CWD）→ 用户数据目录
+        # 2) 老 config.yaml 里的 AK 字段 → 系统 keyring
+        _migrate_on_startup()
+
         self.cfg = load_config()
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)
@@ -87,6 +152,9 @@ class SubtitleApp:
         # 主题切换时刷新托盘
         self.panel.theme_changed.connect(self._on_panel_theme_changed)
 
+        # 字幕窗口任意位置右键 → 弹出托盘菜单（方便不开托盘的人也能用右键操作）
+        self.panel.context_menu_requested.connect(self.tray.popup_at)
+
         # 窗口隐藏请求
         self.panel.hide_requested.connect(
             lambda: self.tray.notify("sub-title", "已最小化到托盘，点击托盘图标恢复")
@@ -98,6 +166,7 @@ class SubtitleApp:
         self._worker: _PipelineWorker | None = None
         self._starting = False        # _start 防重入标志
         self._quitting = False        # 退出流程进行中（避免重复）
+        self._settings_dlg: SettingsDialog | None = None  # 非模态：单例
 
     # ---------- 主题 ----------
     def _on_theme_switch(self, name: str):
@@ -175,22 +244,45 @@ class SubtitleApp:
             return
         try:
             import dataclasses
+            from .config import default_config_path
             data = {
                 "audio": dataclasses.asdict(self.cfg.audio),
                 "asr": dataclasses.asdict(self.cfg.asr),
                 "ui": dataclasses.asdict(self.cfg.ui),
                 "skin": dataclasses.asdict(self.cfg.skin),
             }
-            with open(DEFAULT_CONFIG_PATH, "w", encoding="utf-8") as f:
+            # 写到用户数据目录（不再是项目根 / CWD）
+            path = default_config_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
         except Exception as e:
             print(f"[app] 保存配置失败: {e}")
 
     # ---------- 设置 ----------
     def _open_settings(self):
+        """打开设置对话框 —— **非模态**，可以一边调字幕窗口一边看设置。
+
+        - 多次点托盘"全局设置"：已开就拉到前台，不重复创建
+        - 关闭时（点 X / Apply / OK）自动保存 config
+        """
+        if self._settings_dlg is not None and self._settings_dlg.isVisible():
+            self._settings_dlg.raise_()
+            self._settings_dlg.activateWindow()
+            return
         dlg = SettingsDialog(self.cfg, self.panel, parent=None)
-        dlg.exec_()
+        # 关键：非模态。要在设置开着的时候能继续操作字幕窗口。
+        dlg.setAttribute(Qt.WA_DeleteOnClose, False)
+        dlg.finished.connect(self._on_settings_finished)
+        self._settings_dlg = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _on_settings_finished(self, _result):
+        """设置窗口关闭（含点 Apply / OK / Cancel / X）后保存配置。"""
         self._save_config()
+        self._settings_dlg = None
 
     # ---------- 皮肤编辑器 ----------
     def _open_skin_editor(self):

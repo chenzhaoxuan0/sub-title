@@ -1,0 +1,56 @@
+# sub-title 配置模板
+# 复制为 config.yaml 放在你的用户数据目录（见 README「数据存储位置」）：
+#   Windows: %APPDATA%\sub-title\config.yaml
+#   macOS:   ~/Library/Application Support/sub-title/config.yaml
+#   Linux:   ~/.config/sub-title/config.yaml
+#
+# 重要：本文件**不包含任何 API key**。AccessKey / Secret / AppKey 由设置对话框
+# 写入系统保险箱（Windows Credential Manager / macOS Keychain / Linux libsecret），
+# 绝不放进 config.yaml。
+
+audio:
+  target_sample_rate: 16000
+  chunk_seconds: 0.6
+  input_device: null            # null = 系统默认输出设备
+
+asr:
+  engine_type: funasr           # funasr / sensevoice / aliyun
+  # ---- FunASR（本地流式，GPU 推荐）----
+  model: paraformer-zh-streaming
+  device: cuda                  # cuda / cpu
+  chunk_size: [0, 10, 5]
+  encoder_chunk_look_back: 4
+  decoder_chunk_look_back: 1
+  disable_update: true
+  punc_model: ct-punc
+  # ---- SenseVoice（本地段式，CPU 可跑）----
+  sensevoice_model: iic/SenseVoiceSmall
+  sensevoice_device: cpu        # Mac 用 cpu
+  sensevoice_segment_seconds: 2.0
+  # ---- 阿里云 NLS（云端，任意平台）----
+  aliyun_region: cn-shanghai    # region 不是密钥，可以放这里
+  # aliyun_access_key_id / aliyun_access_key_secret / aliyun_appkey
+  # 这三个字段**不要**填在这里！去「设置 → 识别 → 阿里云 API」里填，会自动存到系统保险箱。
+
+ui:
+  font_family: Microsoft YaHei
+  font_size: 22
+  window_opacity: 0.88
+  max_chars: 20000
+  theme: Dark                   # Dark / Light / Nord / Tokyo Night / ...
+  always_on_top: true
+  close_action: ask             # ask / hide / quit
+  toolbar_hide_delay_ms: 800
+  lock_scroll_to_bottom: false
+  min_win_w: 30                 # 注意：实际被代码硬覆盖为 30，这里只是字段保留
+  min_win_h: 30
+
+skin:
+  enabled: false
+  active_skin: ''
+  skins_dir: skins
+  editor_grid_snap: true
+  editor_grid_size: 8
+  editor_show_guides: true
+  animation_fps: 30
+  animation_loop: true

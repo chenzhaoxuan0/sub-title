@@ -4,6 +4,8 @@
 
 支持三种识别引擎可切换：**本地 FunASR 流式**（低延迟，需 GPU）、**本地 SenseVoice 小模型**（CPU 可跑，适合 Mac/弱设备）、**阿里云 NLS API**（任意平台，免本地算力）。
 
+**🔐 凭证安全**：AccessKey / Secret / AppKey 存到操作系统级保险箱（Windows Credential Manager / macOS Keychain / Linux Secret Service），**绝不**写进 `config.yaml`，避免被 Git 提交 / 截图 / 同步盘泄露。详见 [凭证存储与安全](#凭证存储与安全)。
+
 ## 功能特性
 
 ### 识别引擎（可切换）
@@ -33,7 +35,7 @@
 - 「立刻滚动到底部」按钮：误操作后一键回底
 
 ### 其他
-- 配置持久化（引擎、窗口、主题、字体、透明度、关闭行为等全部存到 `config.yaml`）
+- 配置持久化（引擎、窗口、主题、字体、透明度、关闭行为等存到**用户数据目录的 `config.yaml`**；API 凭证存到系统保险箱）
 - 完全离线（本地引擎模式，模型首次下载除外）
 
 ## 截图
@@ -52,7 +54,7 @@
 ### 2. 创建环境 + 安装依赖
 双击项目里的 `scripts/setup_env.bat`，它会自动：
 - 创建 conda 环境 `subtitle`（Python 3.11）
-- 安装 funasr / soundcard / PySide6 等依赖
+- 安装 funasr / soundcard / PySide6 / platformdirs / keyring 等依赖
 - 安装 torch CUDA 12.1 版（约 2.5GB）
 
 或手动执行：
@@ -94,7 +96,7 @@ python -m subtitle
    ```
 2. 在[阿里云智能语音交互控制台](https://nls-portal.console.aliyun.com/)开通服务，创建项目，获取 **AccessKey ID / AccessKey Secret / AppKey**
 3. 设置 → 识别引擎 → 选「阿里云 API」→ 填入三项凭证
-4. 应用。凭证存于本地 `config.yaml`，不上传
+4. 点「应用」。**凭证会存到操作系统级保险箱**（Windows Credential Manager / macOS Keychain / Linux Secret Service），**不会**写进 `config.yaml`，避免被 git 提交 / 截图 / 同步盘泄露。卸载重装或换电脑需要重新填。
 
 > 阿里云实时语音识别按语音时长计费，新用户通常有免费额度，具体以控制台为准。
 
@@ -130,9 +132,41 @@ themes/
 
 ## 配置说明
 
-所有配置在 `config.yaml`，运行中通过设置对话框修改会自动写回。
+所有配置存放在**用户数据目录**的 `config.yaml`（不是项目根），运行中通过设置对话框修改会自动写回。
 
-关键字段：
+### 数据存储位置
+
+| OS | 配置目录 | `config.yaml` 路径 |
+|---|---|---|
+| **Windows** | `%APPDATA%\sub-title\` | `C:\Users\<你>\AppData\Roaming\sub-title\config.yaml` |
+| **macOS** | `~/Library/Application Support/sub-title/` | `~/Library/Application Support/sub-title/config.yaml` |
+| **Linux** | `~/.config/sub-title/` | `~/.config/sub-title/config.yaml` |
+
+> 项目根目录下的 `config.yaml`（老版本位置）**只用于一次性迁移**。打包成 EXE/DMG 后这层路径会指向不可写位置（`Program Files` / `.app` 包），所以新代码一律走用户数据目录。
+>
+> 首次启动时如果检测到老位置的 `config.yaml`，会自动复制到新位置并把老文件改名成 `config.yaml.migrated` 存档。
+
+### 凭证存储与安全
+
+**AccessKey ID / Secret / AppKey 不存进 `config.yaml`**，改由操作系统级保险箱保管：
+
+| OS | 底层 |
+|---|---|
+| **Windows** | Windows Credential Manager（系统级加密，登录账号绑定） |
+| **macOS** | Keychain（系统级加密，用户登录密码保护） |
+| **Linux** | Secret Service / KWallet（需要 `libsecret-1-0` / `kwallet` 守护进程） |
+
+在设置对话框填 AccessKey 后点「应用」即写入保险箱。**卸载重装或换电脑需要重新填**。
+
+> 安全性：
+> - ✅ 不会被 `git add .` 误提交
+> - ✅ 截图 / 分享 `config.yaml` 不会泄露 AK
+> - ✅ 同步盘 / 备份软件不会把 AK 同步走
+> - ⚠️ 系统级：拿到你系统登录账号的人可以读到（这是任何本地凭证库的共性）——比明文存 `config.yaml` 安全得多，但**不能替代良好的系统访问控制**
+>
+> fallback：如果 `keyring` 不可用（比如 Linux 没装 libsecret 守护进程），凭证会退化到 `<用户数据目录>/credentials.json`，Unix 上自动 `chmod 600`（仅 owner 读写）。Windows 上靠 NTFS 默认用户隔离。
+
+### 关键字段示例
 
 ```yaml
 asr:
@@ -146,9 +180,9 @@ asr:
   sensevoice_device: cpu
   sensevoice_segment_seconds: 2.0
   # 阿里云
-  aliyun_access_key_id: ''
-  aliyun_access_key_secret: ''
-  aliyun_appkey: ''
+  aliyun_region: cn-shanghai   # region 不是密钥，可以放这里
+  # AccessKey ID / Secret / AppKey 不在这里！
+  # 三个字段在设置对话框里填，会自动存到系统保险箱。详见上文「凭证存储与安全」。
 
 audio:
   target_sample_rate: 16000
@@ -170,8 +204,10 @@ ui:
 ```
 sub-title/
 ├── src/subtitle/
-│   ├── app.py               # PyQt 主入口（pipeline + 面板 + 托盘）
-│   ├── config.py            # 配置加载（dataclass）
+│   ├── app.py               # PyQt 主入口（pipeline + 面板 + 托盘 + 启动迁移）
+│   ├── config.py            # 配置加载（dataclass，不含 AK 字段）
+│   ├── paths.py             # 跨平台用户数据目录（%APPDATA% / ~/Library / ~/.config）
+│   ├── credentials.py       # 凭证管理（系统 keyring + fallback）
 │   ├── pipeline.py          # 采集 → 队列 → 引擎.feed 的事件驱动管线
 │   ├── audio/
 │   │   ├── capture.py       # soundcard WASAPI loopback 采集
@@ -181,16 +217,17 @@ sub-title/
 │   │   ├── factory.py       # 引擎工厂（按 engine_type 创建）
 │   │   ├── funasr_engine.py # FunASR 流式
 │   │   ├── sensevoice_engine.py  # SenseVoice 段式伪流式
-│   │   └── aliyun_engine.py # 阿里云 NLS API 流式
+│   │   └── aliyun_engine.py # 阿里云 NLS API 流式（凭证从 keyring 读）
 │   └── ui/
 │       ├── subtitle_panel.py    # 沉浸式无边框字幕窗口
 │       ├── settings_dialog.py   # 全功能设置对话框
 │       ├── theme_engine.py      # 主题引擎（颜色/几何预设、自定义保存、回收站）
 │       ├── trash_dialog.py      # 主题回收站对话框
+│       ├── flow_layout.py       # 自动换行水平布局
 │       └── tray.py              # 系统托盘 + 右键菜单
 ├── scripts/                 # 调试/安装脚本
 ├── themes/                  # 用户自定义主题（运行时生成，git 忽略）
-├── config.yaml              # 运行配置
+├── config.yaml.example      # 配置模板（git 入库；真 config.yaml 不入库）
 ├── environment.yml          # conda 环境定义
 └── requirements.txt
 ```
@@ -256,6 +293,8 @@ conda init powershell
 - **音频捕获**：[soundcard](https://github.com/bastibe/SoundCard)（WASAPI loopback）
 - **UI**：[PySide6](https://www.qt.io/qt-for-python)（Qt 官方 Python 绑定，LGPLv3）；Fluent 风格设置 UI 为手写 QSS，未使用第三方 Fluent 组件库
 - **推理**：[PyTorch](https://pytorch.org/)（CUDA 12.1）
+- **跨平台路径**：[platformdirs](https://pypi.org/project/platformdirs/)
+- **凭证存储**：[keyring](https://pypi.org/project/keyring/)（Windows Credential Manager / macOS Keychain / Linux Secret Service）
 
 ## License
 

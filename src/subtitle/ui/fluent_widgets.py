@@ -68,8 +68,12 @@ class SettingCard(QFrame):
     def __init__(self, title: str, content: str = "", widget: QWidget | None = None, parent=None):
         super().__init__(parent)
         self.setObjectName("settingCard")
-        self.setFixedHeight(64)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # 之前用 setFixedHeight(64) 把卡片锁死成 64px 高，
+        # 导致 FlowLayout 多行按钮（主题管理那 8 个）被裁掉——只能看到第一行。
+        # 改为 setMinimumHeight(64)：单行控件的卡片保持原 64px 高度；
+        # 内容需要更高的卡片（FlowLayout 多行 / 大型控件）允许自动撑高。
+        self.setMinimumHeight(64)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         self._hbox = QHBoxLayout(self)
         self._hbox.setContentsMargins(16, 8, 16, 8)
