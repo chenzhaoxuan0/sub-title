@@ -92,6 +92,15 @@ class SettingsDialog(QDialog):
             QTabWidget::pane {{
                 border: 1px solid {colors.subtitle_border};
                 border-radius: 6px;
+                background-color: {colors.tray_bg};
+            }}
+            /* QScrollArea 及其内容透明，透出 QDialog/Tab 的深色背景，
+               否则外观/行为页会显示系统默认白底，白字看不见 */
+            QScrollArea, QScrollArea > QWidget > QWidget {{
+                background-color: transparent;
+            }}
+            QFrame[frameShape="0"] {{
+                background-color: transparent;
             }}
             QTabBar::tab {{
                 background-color: {colors.toolbar_bg};
@@ -107,6 +116,7 @@ class SettingsDialog(QDialog):
             }}
             QGroupBox {{
                 color: {colors.tray_text};
+                background-color: transparent;
                 border: 1px solid {colors.subtitle_border};
                 border-radius: 6px;
                 margin-top: 12px;
