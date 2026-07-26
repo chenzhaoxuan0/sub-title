@@ -28,3 +28,6 @@ dist/
 
 # ZCode 工具内部文件
 .zcode/
+
+# 用户运行时主题目录（运行 app 后自动产生）
+themes/
