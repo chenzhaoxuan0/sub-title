@@ -231,7 +231,10 @@ class SettingsDialog(QDialog):
         hint.setWordWrap(True)
         ap.addWidget(hint)
         ap.addStretch(1)
-        self.engine_stack.addWidget(aliyun_panel)
+        # engine_stack 物理索引须与 engine_combo 下拉顺序一致
+        # （funasr=0, sensevoice=1, faster_whisper=2, aliyun=3），
+        # 下拉里 faster_whisper 在 aliyun 之前，故 fw_panel 先入栈、
+        # aliyun_panel 延后到 fw_panel 之后入栈（见函数末尾）。
         # faster-whisper（CTranslate2 后端，多语言+翻译，不依赖 torch）
         fw_panel = QWidget()
         wp = QVBoxLayout(fw_panel)
@@ -257,11 +260,11 @@ class SettingsDialog(QDialog):
         self.fw_device_combo.addItem("CPU", "cpu")
         wp.addWidget(_row("设备", "auto=有GPU用GPU否则CPU，不崩", self.fw_device_combo))
         self.fw_compute_combo = QComboBox()
-        for v, label in [("auto", "auto（自动）"),
-                         ("float16", "float16（GPU）"),
-                         ("int8", "int8（CPU 最快）"),
-                         ("int8_float16", "int8_float16（省显存）")]:
-            self.fw_compute_combo.addItem(label, v)
+        for cv, label in [("auto", "auto（自动）"),
+                          ("float16", "float16（GPU）"),
+                          ("int8", "int8（CPU 最快）"),
+                          ("int8_float16", "int8_float16（省显存）")]:
+            self.fw_compute_combo.addItem(label, cv)
         wp.addWidget(_row("计算精度", "auto=GPU用float16/CPU用int8", self.fw_compute_combo))
         self.fw_lang_combo = QComboBox()
         self.fw_lang_combo.addItem("中文", "zh")
@@ -288,6 +291,7 @@ class SettingsDialog(QDialog):
                 w.setEnabled(False)
         wp.addStretch(1)
         self.engine_stack.addWidget(fw_panel)
+        self.engine_stack.addWidget(aliyun_panel)
         v.addWidget(self.engine_stack)
 
         v.addStretch(1)
