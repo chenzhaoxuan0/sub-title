@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 import platform
-from PyQt5.QtCore import QObject, pyqtSignal, Qt
-from PyQt5.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QPen, QBrush
-from PyQt5.QtWidgets import QSystemTrayIcon, QMenu, QAction, QActionGroup
+from PySide6.QtCore import QObject, Signal, Qt
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QPen, QBrush, QAction, QActionGroup
+from PySide6.QtWidgets import QSystemTrayIcon, QMenu
 
 from .theme_engine import get_theme_manager, ThemeManager
 
@@ -45,7 +45,7 @@ def _make_icon(color: str = "#3a6ea5", style: str = "modern") -> QIcon:
         p.drawLine(16, 42, 34, 42)
     else:
         # 现代风格：渐变圆角背景 + 白色字幕线
-        from PyQt5.QtGui import QLinearGradient
+        from PySide6.QtGui import QLinearGradient
         grad = QLinearGradient(4, 12, 60, 52)
         base = QColor(color)
         grad.setColorAt(0, base.lighter(120))
@@ -107,15 +107,15 @@ class TrayController(QObject):
     """托盘控制器 v2。"""
 
     # 信号
-    toggle_visibility_requested = pyqtSignal()
-    start_requested = pyqtSignal()
-    stop_requested = pyqtSignal()
-    toggle_theme_requested = pyqtSignal()
-    toggle_pin_requested = pyqtSignal()
-    settings_requested = pyqtSignal()
-    skin_editor_requested = pyqtSignal()
-    quit_requested = pyqtSignal()
-    theme_switch_requested = pyqtSignal(str)  # 切换到指定主题
+    toggle_visibility_requested = Signal()
+    start_requested = Signal()
+    stop_requested = Signal()
+    toggle_theme_requested = Signal()
+    toggle_pin_requested = Signal()
+    settings_requested = Signal()
+    skin_editor_requested = Signal()
+    quit_requested = Signal()
+    theme_switch_requested = Signal(str)  # 切换到指定主题
 
     def __init__(self, parent=None):
         super().__init__(parent)

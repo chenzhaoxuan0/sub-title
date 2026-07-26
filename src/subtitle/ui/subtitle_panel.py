@@ -18,9 +18,9 @@ v4 新增：
 from __future__ import annotations
 
 import platform
-from PyQt5.QtCore import Qt, QPoint, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QTextCursor, QMouseEvent, QPainter, QColor
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, QPoint, QTimer, Signal
+from PySide6.QtGui import QFont, QTextCursor, QMouseEvent, QPainter, QColor
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton,
     QLabel, QComboBox, QSizeGrip, QSlider, QSpinBox, QFontComboBox,
     QApplication, QMessageBox, QCheckBox, QSizePolicy,
@@ -98,10 +98,10 @@ class OverlayLayer(QWidget):
 class SubtitlePanel(QWidget):
     """沉浸式无边框字幕窗口 v4。"""
 
-    _text_appended = pyqtSignal(str, bool)
-    hide_requested = pyqtSignal()
-    quit_requested = pyqtSignal()
-    theme_changed = pyqtSignal(str)  # 主题切换信号
+    _text_appended = Signal(str, bool)
+    hide_requested = Signal()
+    quit_requested = Signal()
+    theme_changed = Signal(str)  # 主题切换信号
 
     def __init__(self, ui_cfg: UiConfig, on_start=None, on_stop=None, on_quit=None,
                  on_geometry_changed=None):

@@ -12,8 +12,8 @@ import math
 from pathlib import Path
 from typing import Optional
 
-from PyQt5.QtCore import Qt, QPointF, QRectF
-from PyQt5.QtGui import QPainter, QPixmap, QTransform, QImage
+from PySide6.QtCore import Qt, QPointF, QRectF
+from PySide6.QtGui import QPainter, QPixmap, QTransform, QImage
 
 from .model import SkinDefinition, Layer
 

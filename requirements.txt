@@ -10,8 +10,8 @@ soundfile
 numpy
 librosa
 
-# UI
-PyQt5
+# UI（PySide6 是 LGPL，允许 MIT 项目链接，无 GPL 传染问题；原 PyQt5 是 GPLv3）
+PySide6
 
 # 配置
 PyYAML

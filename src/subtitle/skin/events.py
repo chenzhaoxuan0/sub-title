@@ -15,7 +15,7 @@ import random
 import time
 from typing import Callable, Optional
 
-from PyQt5.QtCore import QObject, QTimer, pyqtSignal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from .model import SkinDefinition, Trigger, TriggerType, AnimationAction
 
@@ -24,7 +24,7 @@ class TriggerManager(QObject):
     """触发器管理器：监听事件、管理定时器、触发动作播放。"""
 
     # 动作触发信号：(action_name, layer_overrides)
-    action_triggered = pyqtSignal(str)
+    action_triggered = Signal(str)
 
     def __init__(self, skin: SkinDefinition, parent=None):
         super().__init__(parent)

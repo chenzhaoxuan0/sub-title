@@ -13,18 +13,18 @@ import math
 from pathlib import Path
 from typing import Optional
 
-from PyQt5.QtCore import (
-    Qt, QPoint, QPointF, QRectF, QTimer, pyqtSignal, QSize,
+from PySide6.QtCore import (
+    Qt, QPoint, QPointF, QRectF, QTimer, Signal, QSize,
 )
-from PyQt5.QtGui import (
+from PySide6.QtGui import (
     QPainter, QPixmap, QColor, QPen, QBrush, QFont, QMouseEvent,
-    QWheelEvent, QKeyEvent, QTransform, QImage,
+    QWheelEvent, QKeyEvent, QTransform, QImage, QAction,
 )
-from PyQt5.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QSplitter,
     QListWidget, QListWidgetItem, QPushButton, QLabel, QSpinBox,
     QDoubleSpinBox, QSlider, QComboBox, QFileDialog, QMessageBox,
-    QGroupBox, QFormLayout, QCheckBox, QToolBar, QAction,
+    QGroupBox, QFormLayout, QCheckBox, QToolBar,
     QScrollArea, QFrame, QSizePolicy, QInputDialog, QMenu,
     QAbstractItemView, QApplication, QStatusBar,
 )
@@ -45,9 +45,9 @@ from .events import TriggerManager
 class SkinCanvas(QWidget):
     """皮肤编辑画布：显示字幕区背景 + 所有图层，支持拖拽/选中/缩放。"""
 
-    layer_selected = pyqtSignal(str)  # layer_id
-    layer_moved = pyqtSignal(str, float, float)  # layer_id, x, y
-    canvas_clicked = pyqtSignal()  # 点击空白处（取消选中）
+    layer_selected = Signal(str)  # layer_id
+    layer_moved = Signal(str, float, float)  # layer_id, x, y
+    canvas_clicked = Signal()  # 点击空白处（取消选中）
 
     def __init__(self, skin: SkinDefinition, base_dir: Path, parent=None):
         super().__init__(parent)
@@ -183,8 +183,8 @@ class SkinCanvas(QWidget):
 class TimelineWidget(QWidget):
     """时间轴：显示播放头、关键帧菱形标记、图层轨道。"""
 
-    time_changed = pyqtSignal(float)
-    play_state_changed = pyqtSignal(bool)
+    time_changed = Signal(float)
+    play_state_changed = Signal(bool)
 
     def __init__(self, skin: SkinDefinition, parent=None):
         super().__init__(parent)
@@ -323,9 +323,9 @@ class TimelineWidget(QWidget):
 class PropertyPanel(QWidget):
     """选中图层的属性编辑面板 + 关键帧打点。"""
 
-    property_changed = pyqtSignal(str, str, float)  # layer_id, prop, value
-    keyframe_added = pyqtSignal(str, str, float, float)  # layer_id, prop, time, value
-    keyframe_removed = pyqtSignal(str, str, float)  # layer_id, prop, time
+    property_changed = Signal(str, str, float)  # layer_id, prop, value
+    keyframe_added = Signal(str, str, float, float)  # layer_id, prop, time, value
+    keyframe_removed = Signal(str, str, float)  # layer_id, prop, time
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -484,9 +484,9 @@ class PropertyPanel(QWidget):
 class LayerPanel(QWidget):
     """图层列表面板。"""
 
-    layer_selected = pyqtSignal(str)
-    layer_visibility_changed = pyqtSignal(str, bool)
-    layer_order_changed = pyqtSignal()
+    layer_selected = Signal(str)
+    layer_visibility_changed = Signal(str, bool)
+    layer_order_changed = Signal()
 
     def __init__(self, skin: SkinDefinition, parent=None):
         super().__init__(parent)

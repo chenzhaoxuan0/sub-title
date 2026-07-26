@@ -4,8 +4,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PyQt5.QtCore import QObject, QThread, pyqtSignal
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtWidgets import QApplication
 
 from .config import load_config, DEFAULT_CONFIG_PATH
 from .asr import create_engine
@@ -20,9 +20,9 @@ except ImportError:
 
 
 class _PipelineWorker(QObject):
-    started = pyqtSignal()
-    failed = pyqtSignal(str)
-    text = pyqtSignal(str, bool)
+    started = Signal()
+    failed = Signal(str)
+    text = Signal(str, bool)
 
     def __init__(self, cfg, device_name):
         super().__init__()

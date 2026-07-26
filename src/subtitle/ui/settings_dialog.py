@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QFont, QColor
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QFont, QColor
+from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QSpinBox,
     QCheckBox, QDialogButtonBox, QLabel, QGroupBox, QTabWidget, QWidget,
     QTextEdit, QPushButton, QFontComboBox, QApplication, QMessageBox,
@@ -678,7 +678,7 @@ class SettingsDialog(QDialog):
         self.panel.set_theme_obj(theme)
 
     def _on_save_theme(self):
-        from PyQt5.QtWidgets import QInputDialog
+        from PySide6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(self, "保存主题", "主题名称：")
         if ok and name.strip():
             theme = self._theme_mgr.current
