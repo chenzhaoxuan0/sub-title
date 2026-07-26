@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from ..config import UiConfig
 from ..audio import list_loopback_devices
+from .line_breaker import LineBreaker
 from .theme_engine import Theme, ThemeManager, get_theme_manager
 
 
@@ -272,6 +273,10 @@ class SubtitlePanel(QWidget):
         self._flush_timer.setSingleShot(True)
         self._flush_timer.setInterval(16)
         self._flush_timer.timeout.connect(self._flush_pending_text)
+
+        # 自动分行器：识别到句末标点或引擎边界时换行。只作用于字幕显示，
+        # 不影响 skin 触发器（skin 走原始文本路径）。
+        self._line_breaker = LineBreaker(enabled=self.ui_cfg.line_break_enabled)
 
         self._init_window_flags()
         self._init_ui()
@@ -924,7 +929,10 @@ class SubtitlePanel(QWidget):
             return
         text = self._pending_text
         self._pending_text = ""
+        had_final = self._pending_has_final
         self._pending_has_final = False
+        # 自动分行：句末标点或引擎边界（is_final）处插换行。
+        text = self._line_breaker.feed(text, had_final)
         self._insert_text(text)
         if not self._grabbing_skin_background:
             self.preview_state_changed.emit()
@@ -1188,6 +1196,14 @@ class SubtitlePanel(QWidget):
 
     def set_max_chars(self, n: int):
         self.ui_cfg.max_chars = int(n)
+
+    def set_line_break(self, enabled: bool):
+        """开关自动分行。即时生效（下次 flush 按新设置），无需重渲染已有文本。"""
+        self.ui_cfg.line_break_enabled = bool(enabled)
+        self._line_breaker.set_enabled(bool(enabled))
+
+    def get_line_break(self) -> bool:
+        return self.ui_cfg.line_break_enabled
 
     def set_close_action(self, action: str):
         self.ui_cfg.close_action = action

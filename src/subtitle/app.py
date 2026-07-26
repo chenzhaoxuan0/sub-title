@@ -79,6 +79,41 @@ def _extract_credentials_to_keyring(yaml_path: Path, *, clear_after: bool) -> No
             print(f"[startup] 清理 {yaml_path} 的 AK 字段失败: {e}")
 
 
+def _apply_first_run_recommendation() -> None:
+    """首次启动：检测硬件，把推荐的引擎/设备写进 config.yaml。
+
+    判定首次启动的信号：config.yaml 不存在（load_config 在此情况下返回默认 Config）。
+    非首次启动直接返回，绝不覆盖用户已选配置。
+
+    只写 asr 段的推荐字段（engine_type + 配置覆盖），其余字段由 load_config 的
+    _build 合并 dataclass 默认值。
+    """
+    config_file = paths.config_path()
+    if config_file.exists() or yaml is None:
+        return  # 非首次启动，不动
+
+    from . import hardware
+    try:
+        info = hardware.detect()
+        engine_type, overrides = hardware.recommend_engine(info)
+    except Exception as e:
+        print(f"[startup] 硬件检测失败，沿用默认配置: {e}")
+        return
+
+    asr_section = {"engine_type": engine_type, **overrides}
+    try:
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_file, "w", encoding="utf-8") as f:
+            yaml.safe_dump({"asr": asr_section}, f,
+                           allow_unicode=True, sort_keys=False)
+        gpu = f"{info['gpu_name']}({info['cuda_vram_gb']}GB)" if info["has_cuda"] else "无"
+        print(f"[startup] 首次启动硬件检测：CPU={info['cpu_cores']}核 "
+              f"RAM={info['ram_gb']}GB GPU={gpu} "
+              f"AppleSilicon={info['is_apple_silicon']} → 推荐 {engine_type}")
+    except Exception as e:
+        print(f"[startup] 写推荐配置失败: {e}")
+
+
 class _PipelineWorker(QObject):
     started = Signal()
     failed = Signal(str)
@@ -121,6 +156,7 @@ class SubtitleApp:
         # 1) 老位置的 config.yaml（项目根 / CWD）→ 用户数据目录
         # 2) 老 config.yaml 里的 AK 字段 → 系统 keyring
         _migrate_on_startup()
+        _apply_first_run_recommendation()   # 首次启动按硬件写推荐引擎/设备
 
         self.cfg = load_config()
         self.app = QApplication(sys.argv)

@@ -23,4 +23,15 @@ def create_engine(cfg, on_result: OnResult) -> AsrEngine:
         from .aliyun_engine import AliyunEngine
         return AliyunEngine(cfg.asr, on_result)
 
-    raise ValueError(f"未知引擎类型: {engine_type}（支持: funasr/sensevoice/aliyun）")
+    if engine_type == "faster_whisper":
+        try:
+            from .faster_whisper_engine import FasterWhisperEngine
+        except ImportError as e:
+            raise ImportError(
+                "faster-whisper 未安装。多语言/翻译引擎需要它，安装：pip install faster-whisper"
+            ) from e
+        return FasterWhisperEngine(cfg.asr, on_result)
+
+    raise ValueError(
+        f"未知引擎类型: {engine_type}（支持: sensevoice/funasr/faster_whisper/aliyun）"
+    )
