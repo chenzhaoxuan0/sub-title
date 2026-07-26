@@ -92,6 +92,11 @@ class SystemAudioCapture(threading.Thread):
 
     def stop(self):
         self._stop.set()
+        # 等录音流真正关闭（rec.record 阻塞 ~0.6s），避免退出时 recorder 与解释器关闭竞态
+        try:
+            self.join(timeout=2)
+        except Exception:
+            pass
 
     def _run_loop(self):
         mic = _find_loopback(self.speaker_name)

@@ -2,6 +2,7 @@
 
 模型：paraformer-zh-streaming（online 版）
 feed 内部同步调 model.generate(cache 维持状态)，有结果就走 on_result 回调。
+stop 后置 _closed，feed 直接返回；generate 异常后重置 cache。
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ class FunAsrEngine(AsrEngine):
         super().__init__(cfg, on_result)
         self.model = None
         self.cache: dict = {}
+        self._closed = False
 
     def load(self) -> None:
         from funasr import AutoModel
@@ -27,8 +29,8 @@ class FunAsrEngine(AsrEngine):
         print("[funasr] 模型就绪")
 
     def feed(self, chunk: np.ndarray) -> None:
-        if self.model is None:
-            raise RuntimeError("模型未加载，先调 load()")
+        if self._closed or self.model is None:
+            return
         try:
             res = self.model.generate(
                 input=chunk,
@@ -43,13 +45,16 @@ class FunAsrEngine(AsrEngine):
             if res and res[0].get("text"):
                 self.on_result(res[0]["text"], False)
         except Exception as e:
-            print(f"[funasr] feed 异常: {e}")
+            print(f"[funasr] feed 异常，重置 cache: {e}")
+            self.cache = {}   # 异常后重置，避免半更新状态污染下一段
 
     def stop(self) -> None:
-        # 发 final chunk 触发尾部 flush（可选，这里简单清 cache）
-        try:
-            if self.model is not None:
-                # 喂一个空 final 触发收尾
+        if self._closed:
+            return
+        self._closed = True
+        if self.model is not None:
+            try:
+                # 喂空 final chunk 触发尾部 flush
                 self.model.generate(
                     input=np.zeros(960, dtype=np.float32),
                     cache=self.cache,
@@ -60,9 +65,10 @@ class FunAsrEngine(AsrEngine):
                     language="zh",
                     use_itn=True,
                 )
-        except Exception:
-            pass
+            except Exception as e:
+                print(f"[funasr] stop final 异常: {e}")
         self.cache = {}
 
     def reset(self) -> None:
         self.cache = {}
+        self._closed = False
