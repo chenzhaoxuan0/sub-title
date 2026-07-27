@@ -19,14 +19,24 @@ try:
 except ImportError:
     psutil = None
 
+# detect() 结果缓存：硬件信息在程序生命周期内不变，缓存后多处调用只探测一次
+_cached_info: Any = None
 
-def detect() -> dict[str, Any]:
+
+def detect(force: bool = False) -> dict[str, Any]:
     """检测本机硬件，返回信息字典。
 
     返回字段：
       os, cpu_cores, ram_gb, has_cuda, cuda_vram_gb, gpu_name, is_apple_silicon
     torch 不可用时 has_cuda=False，但 is_apple_silicon 仍按平台判断。
+
+    结果在程序生命周期内缓存（硬件不会在运行时变化）。多次调用——如 app 启动
+    推荐 + 设置页每张 EngineConfigCard 各调一次——只探测一次，避免反复 import
+    torch + 查询 GPU 拖慢设置页打开。force=True 可强制重新探测（一般用不到）。
     """
+    global _cached_info
+    if _cached_info is not None and not force:
+        return _cached_info
     info: dict[str, Any] = {
         "os": platform.system(),
         "cpu_cores": (psutil.cpu_count(logical=True) if psutil else
@@ -47,6 +57,7 @@ def detect() -> dict[str, Any]:
                 torch.cuda.get_device_properties(0).total_memory / (1024 ** 3), 1)
     except Exception:
         pass  # torch 没装或检测失败，has_cuda 保持 False
+    _cached_info = info
     return info
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, QEvent
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor, QCloseEvent
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QSpinBox,
     QCheckBox, QDialogButtonBox, QLabel, QGroupBox, QTabWidget, QWidget,
@@ -508,10 +508,12 @@ class SettingsDialog(QDialog):
 
     # ---------- 滚轮误触防护 ----------
     def _install_wheel_focus_guard(self):
-        """滚轮误触防护：QComboBox/QSpinBox 等控件只有在已聚焦时才响应滚轮。
+        """滚轮误触防护：QComboBox/QSpinBox 等控件只有被鼠标点击后，才响应滚轮。
 
-        Qt 默认行为是鼠标悬停在这些控件上滚动就会改值，在设置页滚动浏览时
-        极易误触。装事件过滤器：未聚焦时吃掉 Wheel 事件，聚焦后放行。
+        Qt 默认行为是鼠标悬停在控件上滚动就改值，在设置页滚动浏览时极易误触。
+        早先版本用 hasFocus() 判断，但焦点可能被键盘 Tab / Qt 自动聚焦被动获得
+        （用户没点过），仍会误触。现改为显式点击追踪：只有「鼠标按下」过的控件
+        才放行滚轮；点了别处或焦点离开就立即收回，杜绝悬停误触。
         """
         # PySide6 的 findChildren 不接受 tuple，逐类型查找后合并
         sensitive_types = (QComboBox, QSpinBox, QDoubleSpinBox, QFontComboBox)
@@ -520,17 +522,40 @@ class SettingsDialog(QDialog):
             targets.extend(self.findChildren(t))
         for w in targets:
             w.installEventFilter(self)
-        # 也要处理焦点变化后让滚轮目标控件自动聚焦的体验：
-        # 鼠标点击控件即聚焦（Qt 默认），聚焦后滚轮就能改值，符合"先选中再改"直觉。
+        # 当前被点击激活、允许滚轮改值的控件；None = 无（全部吃掉滚轮）
+        self._wheel_active_target = None
 
     def eventFilter(self, obj, event):
-        """拦截 QComboBox/QSpinBox 等的滚轮事件：未聚焦时吃掉。"""
-        if event.type() == QEvent.Wheel and hasattr(obj, "hasFocus"):
-            if not obj.hasFocus():
-                # 未聚焦 → 阻止默认处理，滚轮不会改值（交给父滚动区滚动页面）
+        """滚轮防护：只有被鼠标点击过的控件才放行 Wheel；其余一律吃掉交回页面滚动。
+
+        - MouseButtonPress：记录该控件为激活目标，滚轮放行
+        - FocusOut / 鼠标点到别的控件：清除目标，滚轮重新被拦
+        - Wheel：仅当 obj 是当前激活目标时放行，否则吃掉
+        """
+        t = event.type()
+        if t == QEvent.MouseButtonPress:
+            # 点击即激活（包括从别的控件点过来——按下时旧目标会被下面的 FocusOut 清）
+            self._wheel_active_target = obj
+        elif t == QEvent.FocusOut:
+            # 焦点离开当前激活控件 → 收回滚轮权限
+            if self._wheel_active_target is obj:
+                self._wheel_active_target = None
+        elif t == QEvent.Wheel:
+            if obj is not self._wheel_active_target:
+                # 不是刚点过的控件 → 吃掉滚轮，交给父滚动区翻页
                 event.ignore()
                 return True
         return super().eventFilter(obj, event)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """标题栏 X 与底部 Close 按钮走同一路径：reject → finished → app 保存配置。
+
+        非模态单例（WA_DeleteOnClose=False）下，X 默认只调 done() 不一定触发
+        finished 信号，导致 app 的 _on_settings_finished 不执行（配置不保存、
+        单例引用不清空，下次「全局设置」打不开）。这里显式 reject() 保证一致。
+        """
+        self.reject()
+        event.ignore()   # 真正的关闭由 reject → finished → app 链路完成
 
     def _wrap_scroll(self, content: QWidget) -> QScrollArea:
         """把内容包进 Fluent 风格滚动区。"""
