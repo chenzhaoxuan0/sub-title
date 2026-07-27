@@ -1,6 +1,7 @@
 """PyQt 应用主入口 v2 —— pipeline + 字幕面板 + 系统托盘 + 主题引擎 + 皮肤系统。"""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -463,6 +464,16 @@ class SubtitleApp:
             print(f"[app] 退出时 _stop 异常: {e}")
         self.skin_runtime.disable()
         self._save_config()
+        # 显式关闭所有顶层窗口（panel + 非模态设置/皮肤编辑器）。
+        # 之前托盘退出只调 app.quit()，但 panel 没被关闭 → setQuitOnLastWindowClosed
+        # 是 False，窗口和命令行黑框会一直挂着；这里强制全关，让退出彻底。
+        try:
+            for w in list(QApplication.topLevelWidgets()):
+                if w is not None and not getattr(w, "_app_closing", False):
+                    w._app_closing = True
+                    w.close()
+        except Exception as e:
+            print(f"[app] 关闭顶层窗口异常: {e}")
         self.tray.tray.hide()
         self.app.quit()
 
@@ -470,9 +481,26 @@ class SubtitleApp:
         self.panel.show()
         self.tray.show()
         self.tray.notify("sub-title", "已启动，右键托盘图标查看菜单")
+        # 兜底：Qt 事件循环退出后，若后台 C 扩展线程（soundcard WASAPI /
+        # faster-whisper CUDA）卡住导致 sys.exit 无法正常返回，这里强制结束进程，
+        # 保证「托盘退出 / 工具栏 X 退出 / Ctrl+C」都能让窗口 + 命令行黑框一起消失。
+        self.app.aboutToQuit.connect(self._force_exit)
         return self.app.exec_()
+
+    @staticmethod
+    def _force_exit():
+        """事件循环即将退出时强制终止进程，避免后台线程卡死导致残留。"""
+        try:
+            os._exit(0)
+        except Exception:
+            pass
 
 
 def main():
     app = SubtitleApp()
-    sys.exit(app.run())
+    code = app.run()
+    # app.exec_() 正常返回（未被 aboutToQuit 的 os._exit 终止）时的兜底
+    try:
+        os._exit(code)
+    except Exception:
+        sys.exit(code)

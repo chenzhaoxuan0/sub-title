@@ -29,6 +29,11 @@ def make_tabbar_text_horizontal(tabbar: QTabBar) -> None:
     已知行为）。这里用运行时替换 paintEvent 的方式：保留 Qt 原生的纵向堆叠
     布局，只把每个 tab 内的文字绘制改成横向居中。
 
+    关键：不能用 QStyle.drawItemText / painter.drawItemText——它们会根据 rect
+    的宽高比自动决定是否换行/竖排（West 模式下 rect 高>宽，多字文本会被逐字
+    竖排）。改用 QPainter.drawText：它按文本原样横向绘制，配合 Qt.AlignCenter
+    在 rect 内居中，从而得到符合阅读习惯的「从左往右」水平文字。
+
     tabbar: QTabWidget.tabBar() 返回的实例。
     """
     from PySide6.QtWidgets import QStylePainter, QStyleOptionTab
@@ -38,16 +43,19 @@ def make_tabbar_text_horizontal(tabbar: QTabBar) -> None:
     def custom_paint(self, event):
         painter = QStylePainter(self)
         opt = QStyleOptionTab()
+        pal = self.palette()
         for i in range(self.count()):
             self.initStyleOption(opt, i)
             rect = self.tabRect(i)
             # 1) 画 tab 背景/边框/选中态（交给 style，保留 QSS 的圆角/竖条外观）
             painter.drawControl(QStyle.CE_TabBarTabShape, opt)
-            # 2) 文字自己横向绘制（覆盖 style 默认的竖排文字）
-            pal = self.palette()
-            text_role = (QPalette.HighlightedText
-                         if opt.state & QStyle.State_Selected else QPalette.WindowText)
-            painter.drawItemText(rect, Qt.AlignCenter, pal, True, opt.text, text_role)
+            # 2) 文字自己横向绘制（覆盖 style 默认的竖排文字）。
+            #    drawText 不像 drawItemText 那样按宽高比自动竖排，能稳定横向居中。
+            text_color = (pal.color(QPalette.HighlightedText)
+                          if opt.state & QStyle.State_Selected
+                          else pal.color(QPalette.WindowText))
+            painter.setPen(text_color)
+            painter.drawText(rect, Qt.AlignCenter, opt.text)
 
     tabbar.paintEvent = types.MethodType(custom_paint, tabbar)
 
