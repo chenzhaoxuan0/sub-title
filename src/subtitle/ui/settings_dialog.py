@@ -27,7 +27,7 @@ from .theme_engine import (
 )
 from .fluent_widgets import (
     SettingCard, SettingCardGroup, ToggleSwitch, build_fluent_qss,
-    make_tabbar_text_horizontal,
+    HorizontalTextTabBar,
 )
 from .trash_dialog import TrashDialog
 from .flow_layout import FlowLayout
@@ -311,6 +311,9 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         self.tabs = QTabWidget()
+        # 必须使用真正的 QTabBar 子类。给现有实例动态赋值 paintEvent 不会被 Qt 的
+        # C++ 事件分派调用，因此无法改变默认的竖排文字。
+        self.tabs.setTabBar(HorizontalTextTabBar(self.tabs))
         # 垂直标签页：左侧导航栏，右侧内容区。给内容更多纵向空间，
         # 也让设置项更聚合（5 个标签纵向排列比顶部更紧凑）。
         self.tabs.setTabPosition(QTabWidget.West)
@@ -322,10 +325,6 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(self._build_skin_tab(), "皮肤")
         self.tabs.addTab(self._build_transcript_tab(), "文稿")
         self.tabs.currentChanged.connect(self._on_tab_changed)
-        # 让垂直标签的文字横向排列（Qt 默认在 West 模式下逐字竖排，中文难读）。
-        # 注意：必须在 addTab 之后调用（拿到已存在的 tabBar），且不能用 setTabBar
-        # 替换——那会破坏 West 的纵向堆叠布局。
-        make_tabbar_text_horizontal(self.tabs.tabBar())
 
         btns = QDialogButtonBox(QDialogButtonBox.Apply | QDialogButtonBox.Close)
         self._apply_btn = btns.button(QDialogButtonBox.Apply)

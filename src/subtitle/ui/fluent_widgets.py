@@ -11,53 +11,30 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, QRectF, QSize
-from PySide6.QtGui import QPainter, QColor, QPalette
+from PySide6.QtGui import QPainter, QColor
 from PySide6.QtWidgets import (
     QFrame, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSizePolicy,
-    QTabBar,
+    QStyle, QStyleOptionTab, QStylePainter, QTabBar,
 )
 
 
 # ------------------------------------------------------------------
-# HorizontalTabBar：垂直标签页（West/East）下强制横向绘制文字
+# HorizontalTextTabBar：垂直标签页（West/East）下强制横向绘制文字
 # ------------------------------------------------------------------
-def make_tabbar_text_horizontal(tabbar: QTabBar) -> None:
-    """让垂直标签页（West/East）的 tabBar 横向绘制文字（中文不再逐字竖排）。
+class HorizontalTextTabBar(QTabBar):
+    """在 West/East 标签栏中保留纵向导航，同时横向绘制每个标签文字。"""
 
-    Qt 的 QTabBar 在垂直模式下会把文字逐字竖排，中文难以阅读。子类化 QTabBar
-    再 setTabBar 不可行——setTabBar 会破坏 West 模式的纵向堆叠布局（PySide6
-    已知行为）。这里用运行时替换 paintEvent 的方式：保留 Qt 原生的纵向堆叠
-    布局，只把每个 tab 内的文字绘制改成横向居中。
-
-    关键：不能用 QStyle.drawItemText / painter.drawItemText——它们会根据 rect
-    的宽高比自动决定是否换行/竖排（West 模式下 rect 高>宽，多字文本会被逐字
-    竖排）。改用 QPainter.drawText：它按文本原样横向绘制，配合 Qt.AlignCenter
-    在 rect 内居中，从而得到符合阅读习惯的「从左往右」水平文字。
-
-    tabbar: QTabWidget.tabBar() 返回的实例。
-    """
-    from PySide6.QtWidgets import QStylePainter, QStyleOptionTab
-    from PySide6.QtGui import QPalette
-    import types
-
-    def custom_paint(self, event):
+    def paintEvent(self, event) -> None:
         painter = QStylePainter(self)
         opt = QStyleOptionTab()
-        pal = self.palette()
         for i in range(self.count()):
             self.initStyleOption(opt, i)
             rect = self.tabRect(i)
-            # 1) 画 tab 背景/边框/选中态（交给 style，保留 QSS 的圆角/竖条外观）
+            # 背景、边框和选中态仍由当前 Qt style/QSS 绘制。
             painter.drawControl(QStyle.CE_TabBarTabShape, opt)
-            # 2) 文字自己横向绘制（覆盖 style 默认的竖排文字）。
-            #    drawText 不像 drawItemText 那样按宽高比自动竖排，能稳定横向居中。
-            text_color = (pal.color(QPalette.HighlightedText)
-                          if opt.state & QStyle.State_Selected
-                          else pal.color(QPalette.WindowText))
-            painter.setPen(text_color)
+            # QSS 的 color 不会传递到这段自绘文字；深色设置页统一使用白字。
+            painter.setPen(QColor("#ffffff"))
             painter.drawText(rect, Qt.AlignCenter, opt.text)
-
-    tabbar.paintEvent = types.MethodType(custom_paint, tabbar)
 
 
 # ------------------------------------------------------------------
