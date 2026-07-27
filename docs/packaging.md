@@ -37,6 +37,7 @@ pyinstaller sub-title.spec --noconfirm --clean
 - **`hiddenimports`**：
   - `_soundfile_data` + `cffi` + `_cffi_backend`：soundfile 读 wav 必需的 libsndfile 原生库。
   - `soundcard` 全部子模块：Windows mediafoundation 音频后端。
+  - `psutil` 全部子模块：硬件检测（CPU核数/内存）。**必须显式声明**——它的 import 在 `hardware.py` 的 try/except 里，PyInstaller 静态分析会当成可选跳过，导致 exe 里内存永远显示 0GB。
   - `keyring` 全部子模块：Windows Credential Manager 后端（否则凭证退化到明文 json）。
   - 各 `subtitle.asr.*_engine`：让引擎管理页能探测状态。
 - **`excludes`**：排除 torch/funasr 等重依赖，减小体积。

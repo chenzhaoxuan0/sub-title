@@ -36,6 +36,12 @@ hiddenimports += ["_soundfile_data", "cffi", "_cffi_backend"]
 # soundcard 自带 __pyinstaller 钩子目录，PyInstaller 会自动收集；这里显式声明后端模块更稳。
 hiddenimports += collect_submodules("soundcard")
 
+# ---- psutil：硬件检测（CPU核数/内存/进程）。它的 import 在 try/except 里，
+# PyInstaller 静态分析会当成可选跳过 → 必须显式声明。带平台原生库 _psutil_windows.pyd。
+# 不收集会导致 exe 里内存永远显示 0GB（hardware.py 兜底成 0.0）。
+hiddenimports += collect_submodules("psutil")
+datas += collect_data_files("psutil")
+
 # ---- keyring：Windows 用 WinVaultKeyring 后端（凭据管理器）----
 # 必须收集 backends 子包，否则 keyring 找不到 Windows 后端，凭证退化到明文 json。
 hiddenimports += collect_submodules("keyring")

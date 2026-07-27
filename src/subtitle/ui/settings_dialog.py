@@ -661,36 +661,51 @@ class SettingsDialog(QDialog):
     def _build_engine_mgmt_tab(self) -> QWidget:
         """本地引擎依赖管理页：展示各引擎安装状态，未装时给精确安装命令+一键复制。
 
-        纯 API（阿里云）模式无需任何安装；本地引擎按需装，装完重启程序生效。
-        依赖探测用 find_spec（开销极低），设置对话框每次打开都重建实例，
-        所以用户装完依赖重开设置即可看到「已就绪」——无需运行时重扫。
+        纯 API（阿里云）模式无需任何安装；本地引擎按需装，装完点「重新检测」即可看到
+        就绪状态（find_spec 实时探测，无需重启程序）。硬件信息也随重新检测刷新。
         """
         tab = QWidget()
         v = QVBoxLayout(tab)
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(8)
 
-        hw = hardware.detect()
-        has_cuda = bool(hw.get("has_cuda"))
-        gpus = f"{hw.get('gpu_name','无')}" if has_cuda else "无 CUDA"
+        # ---- 顶部说明卡片（含硬件摘要 + 重新检测按钮）----
+        self._hw_summary_label = QLabel()
+        self._hw_summary_label.setStyleSheet("color: #888; font-size: 12px;")
+        self._hw_summary_label.setWordWrap(True)
 
-        # ---- 顶部说明卡片 ----
+        self._rescan_btn = QPushButton("🔄 重新检测")
+        self._rescan_btn.setCursor(Qt.PointingHandCursor)
+        self._rescan_btn.setToolTip("安装/卸载依赖后点此按钮，刷新引擎状态和硬件信息")
+        self._rescan_btn.clicked.connect(self._refresh_engine_mgmt)
+
         intro = QLabel(
             "🟢 阿里云 API 模式无需安装任何依赖，开箱即用（仅需在「识别」页填凭证）。\n"
             "🟡 本地引擎（SenseVoice / FunASR 等）按需安装：复制下方命令到终端执行，"
-            "装完「重启程序」即可在「识别」页选用。\n"
-            f"当前硬件：{hw.get('cpu_cores',0)} 核 / {hw.get('ram_gb',0):g}GB 内存 / GPU：{gpus}"
+            "装完点「重新检测」即可看到就绪状态，无需重启程序。"
         )
         intro.setStyleSheet("color: #888; font-size: 12px;")
         intro.setWordWrap(True)
+
+        # 说明 + 硬件摘要放一起，重新检测按钮单独一行靠右
         intro_card = SettingCard("引擎依赖管理", "", intro, vertical=True)
+        # 在 intro_card 的内容区追加硬件摘要 + 按钮（复用 vertical 卡片的 set_widget 不便，
+        # 改为直接把 intro 作为 widget 后，再单独放硬件行）
         v.addWidget(intro_card)
 
-        # ---- 各本地引擎卡片 ----
-        g = SettingCardGroup("本地引擎")
-        for info in all_local_engines():
-            g.add_card(self._build_engine_install_card(info, has_cuda))
-        v.addWidget(g)
+        # 硬件摘要行：左 label 右按钮
+        hw_row = QHBoxLayout()
+        hw_row.setContentsMargins(0, 0, 0, 0)
+        hw_row.setSpacing(8)
+        hw_row.addWidget(self._hw_summary_label, 1)
+        hw_row.addWidget(self._rescan_btn)
+        hw_w = QWidget()
+        hw_w.setLayout(hw_row)
+        v.addWidget(hw_w)
+
+        # ---- 各本地引擎卡片（容器，便于重新检测时清空重建）----
+        self._engine_cards_container = SettingCardGroup("本地引擎")
+        v.addWidget(self._engine_cards_container)
 
         # ---- 阿里云提示卡片 ----
         api_hint = QLabel(
@@ -704,7 +719,38 @@ class SettingsDialog(QDialog):
         v.addWidget(api_card)
 
         v.addStretch(1)
+        # 首次填充硬件摘要 + 引擎卡片
+        self._refresh_engine_mgmt()
         return self._wrap_scroll(tab)
+
+    def _refresh_engine_mgmt(self) -> None:
+        """重新检测硬件 + 刷新所有引擎卡片状态。
+
+        用户装完依赖（pip install funasr/torch 等）后点「重新检测」，find_spec 会实时
+        探测到新装的包，引擎卡片立即更新为「已就绪」。硬件信息（内存/显存）也一并刷新。
+        hardware.detect() 有缓存，这里用 force=True 强制重扫。
+        """
+        # 强制重扫硬件（psutil 内存、torch CUDA 都实时查）
+        hw = hardware.detect(force=True)
+        has_cuda = bool(hw.get("has_cuda"))
+        gpu_name = hw.get("gpu_name", "")
+        gpus = gpu_name if has_cuda and gpu_name else ("无 CUDA" if not has_cuda else gpu_name)
+        ram = hw.get("ram_gb", 0)
+        ram_str = f"{ram:g}GB" if ram else "未知"
+        self._hw_summary_label.setText(
+            f"当前硬件：{hw.get('cpu_cores', 0)} 核 / {ram_str} 内存 / GPU：{gpus}"
+        )
+
+        # 清空旧卡片，按最新依赖状态重建
+        layout = self._engine_cards_container._cards_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        for info in all_local_engines():
+            self._engine_cards_container.add_card(self._build_engine_install_card(info, has_cuda))
 
     def _build_engine_install_card(self, info, has_cuda: bool) -> SettingCard:
         """构造单个引擎的安装卡片：状态徽标 + 用途 + 安装命令框 + 复制按钮。"""
