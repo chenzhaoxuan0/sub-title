@@ -121,7 +121,9 @@ class _PipelineWorker(QObject):
     """
     started = Signal()
     failed = Signal(str)
-    text = Signal(str, bool, str)           # (text, is_final, source)
+    # text 4 参数：(text, is_final, source, spk_id) —— spk_id 是 Optional[int]，
+    # Qt Signal 不支持 Optional，用 object 兼容 None（funasr + cam++ 才有值，其他引擎 None）。
+    text = Signal(str, bool, str, object)
     audio_level = Signal(float, float, str)  # (rms, peak, source)
 
     def __init__(self, cfg, device_name, mic_device_name,
@@ -137,12 +139,12 @@ class _PipelineWorker(QObject):
 
     def _make_pipeline(self, source: str, device_name) -> SubtitlePipeline:
         """创建一个单源 pipeline。source 决定 capture_kind + engine 的来源标签。"""
-        def on_result(text: str, is_final: bool, src: str = source):
-            self.text.emit(text, is_final, src)
+        def on_result(text: str, is_final: bool, src: str = source, spk_id=None):
+            self.text.emit(text, is_final, src, spk_id)
         engine = create_engine(self.cfg, on_result=on_result, source=source)
         return SubtitlePipeline(
             self.cfg, engine,
-            on_text=lambda t, f, s: self.text.emit(t, f, s),
+            on_text=lambda t, f, s, spk: self.text.emit(t, f, s, spk),
             on_audio_level=lambda rms, peak, s: self.audio_level.emit(rms, peak, s),
             source=source,
             capture_kind=source,
@@ -281,10 +283,10 @@ class SubtitleApp:
             self._thread.started.connect(self._worker.run)
             self._worker.started.connect(self._on_started)
             self._worker.failed.connect(self._on_failed)
-            # 字幕：按 source 上色展示（丢掉 source 给皮肤的 lambda 见下）
-            self._worker.text.connect(lambda t, f, s: self.panel.emit_text(t, f, s))
-            # 皮肤触发器：对 source 透明（合并文本触发，不破坏现有皮肤配置）
-            self._worker.text.connect(lambda t, f, s: self.skin_runtime.on_text(t, f))
+            # 字幕：按 source 上色展示，spk_id 透传到 panel（panel 决定是否渲染显示名）
+            self._worker.text.connect(lambda t, f, s, spk: self.panel.emit_text(t, f, s, spk))
+            # 皮肤触发器：对 source 透明（合并文本触发，不破坏现有皮肤配置，不需要 spk）
+            self._worker.text.connect(lambda t, f, s, spk: self.skin_runtime.on_text(t, f))
             self._worker.audio_level.connect(lambda r, p, s: self.skin_runtime.on_audio_level(r, p))
             self._thread.start()
         finally:

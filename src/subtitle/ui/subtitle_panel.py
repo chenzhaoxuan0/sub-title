@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from ..config import UiConfig
 from ..audio import list_loopback_devices, list_microphone_devices
+from ..core.speaker_names import SpeakerNameMap
 from .line_breaker import LineBreaker
 from .theme_engine import Theme, ThemeManager, get_theme_manager
 
@@ -233,13 +234,15 @@ class SkinExtensionWindow(QWidget):
 class SubtitlePanel(QWidget):
     """沉浸式无边框字幕窗口 v4。"""
 
-    _text_appended = Signal(str, bool, str)   # (text, is_final, source)
+    _text_appended = Signal(str, bool, str, object)  # (text, is_final, source, spk_id)
     hide_requested = Signal()
     quit_requested = Signal()
     theme_changed = Signal(str)  # 主题切换信号
     context_menu_requested = Signal(QPoint)  # 全局坐标；右键任意位置时发出
     skin_clicked = Signal(str, str)
     preview_state_changed = Signal()
+    # 新 spk_id 发现：每当字幕流里出现新的 spk_id，外部 editor 会收到这个信号去自动加一行。
+    spk_id_seen = Signal(str, int)  # (source, spk_id)
 
     def __init__(self, ui_cfg: UiConfig, on_start=None, on_stop=None, on_quit=None,
                  on_geometry_changed=None):
@@ -257,6 +260,15 @@ class SubtitlePanel(QWidget):
         self._skin_runtime = None
         self._grabbing_skin_background = False
 
+        # 说话人区分：每个 source 一份 SpeakerNameMap，跨会话持久化显示名。
+        # 改回默认名 = 删除条目（display 回退「说话人 N」）。
+        self._speaker_names: dict[str, SpeakerNameMap] = {
+            "system": SpeakerNameMap("system", self),
+            "mic": SpeakerNameMap("mic", self),
+        }
+        # 已发现的 spk_id 集合（按 source 分组），用于 spk_id_seen 信号去重
+        self._seen_spk_ids: dict[str, set[int]] = {"system": set(), "mic": set()}
+
         # 应用配置中的主题
         theme_name = ui_cfg.theme or "Dark"
         self._theme_mgr.apply_theme(theme_name)
@@ -269,7 +281,9 @@ class SubtitlePanel(QWidget):
         # P0 性能：字幕追加节流。emit_text 累积到 _pending（按到达顺序的列表，
         # 每条 (text, is_final, source)），16ms 定时器到点一次性 flush，
         # 把每秒 10+ 次插入降到 ~60fps 上限。双源时两路文本在此串行化，互不撕裂。
-        self._pending: list[tuple[str, bool, str]] = []
+        # 每条 (text, is_final, source, spk_id)；spk_id 来自说话人区分引擎（funasr+cam++），
+        # 开启说话人区分时由 panel 调用 SpeakerNameMap.display(spk_id) 解析为显示名。
+        self._pending: list[tuple[str, bool, str, object]] = []
         self._flush_timer = QTimer(self)
         self._flush_timer.setSingleShot(True)
         self._flush_timer.setInterval(16)
@@ -944,15 +958,21 @@ class SubtitlePanel(QWidget):
                                      self._theme_mgr.current.name)
 
     # ---------- 对外接口 ----------
-    def emit_text(self, text: str, is_final: bool, source: str = "system"):
+    def emit_text(self, text: str, is_final: bool, source: str = "system", spk_id=None):
         """跨线程安全：只 emit 信号。Qt 会用 QueuedConnection 把调用送到主线程。
         绝不能在这里直接操作 QTimer/QWidget（它们属于主线程），否则 PySide6 报
         'startTimer from another thread'。"""
-        self._text_appended.emit(text, is_final, source)
+        self._text_appended.emit(text, is_final, source, spk_id)
 
-    def _on_text_appended(self, text: str, is_final: bool, source: str = "system"):
+    def _on_text_appended(self, text: str, is_final: bool, source: str = "system", spk_id=None):
         """主线程槽：累积到 buffer + 节流 flush（这里操作 QTimer 安全）。"""
-        self._pending.append((text, is_final, source))
+        # 说话人区分：发现新 spk_id → 通知外部 editor 自动加一行
+        if spk_id is not None and isinstance(spk_id, int):
+            seen = self._seen_spk_ids.setdefault(source, set())
+            if spk_id not in seen:
+                seen.add(spk_id)
+                self.spk_id_seen.emit(source, spk_id)
+        self._pending.append((text, is_final, source, spk_id))
         if not self._flush_timer.isActive():
             self._flush_timer.start()
 
@@ -962,14 +982,20 @@ class SubtitlePanel(QWidget):
             return
         items = self._pending
         self._pending = []
-        # 合并同源的连续片段以减少富文本碎片（相邻同源 + 同 final 标志的合成一条）
-        merged: list[tuple[str, bool, str]] = []
-        for text, is_final, source in items:
-            if merged and merged[-1][2] == source and merged[-1][1] == is_final:
-                mt, mf, ms = merged[-1]
-                merged[-1] = (mt + text, mf, ms)
+        # 合并同源 + 同 spk_id 的连续片段以减少富文本碎片
+        # （不同 spk 切到不同人时不要合并，颜色/前缀会变）
+        merged: list[tuple[str, bool, str, object]] = []
+        for text, is_final, source, spk_id in items:
+            if (
+                merged
+                and merged[-1][2] == source
+                and merged[-1][1] == is_final
+                and merged[-1][3] == spk_id
+            ):
+                mt, mf, ms, mk = merged[-1]
+                merged[-1] = (mt + text, mf, ms, mk)
             else:
-                merged.append((text, is_final, source))
+                merged.append((text, is_final, source, spk_id))
         # 自动分行：对每条文本过 line_breaker（按句末标点或引擎边界插 \n）。
         # line_breaker 返回的字符串里 \n 是唯一的换行标记；按 \n split 成若干段，
         # 每段一个彩色 span，段间用纯文本 \n 换行（避免 insertHtml 吞 <br>）。
@@ -980,7 +1006,7 @@ class SubtitlePanel(QWidget):
         cursor = QTextCursor(self.view.document())
         cursor.movePosition(QTextCursor.End)
         cursor.beginEditBlock()
-        for text, is_final, source in merged:
+        for text, is_final, source, spk_id in merged:
             if not text:
                 continue
             processed = self._line_breaker.feed(text, is_final)
@@ -992,8 +1018,12 @@ class SubtitlePanel(QWidget):
                     cursor.insertText("\n")
                 if seg:
                     color, icon = self._source_style(source)
+                    # 说话人区分：spk_id 非空时在文字前加 [显示名] 颜色块
+                    prefix = self._speaker_prefix(source, spk_id)
                     safe = html.escape(seg)
-                    cursor.insertHtml(f'<span style="color:{color};">{icon}{safe}</span>')
+                    cursor.insertHtml(
+                        f'<span style="color:{color};">{prefix}{icon}{safe}</span>'
+                    )
             self._trim_if_needed()
         cursor.endEditBlock()
         # 锁定模式：强制跟到底
@@ -1019,6 +1049,23 @@ class SubtitlePanel(QWidget):
         theme = self._theme_mgr.current if self._theme_mgr else None
         color = (theme.colors.subtitle_text if theme else "#f2f2f2")
         return color, "🔊 "
+
+    def _speaker_prefix(self, source: str, spk_id) -> str:
+        """根据 spk_id 渲染 [显示名] 前缀（HTML 片段）。
+
+        - spk_id 为 None → 空（不开说话人区分的源）
+        - spk_id 有值 → [显示名] 颜色块，显示名由 self._speaker_names 查
+          （每个 source 独立一份 SpeakerNameMap 实例）
+        返回的是已 escape 后的 HTML 字符串（不含外层 span，颜色由调用方统一控制）。
+        """
+        if spk_id is None:
+            return ""
+        smap = self._speaker_names.get(source)
+        if smap is None:
+            return ""
+        name = smap.display(spk_id)
+        # 用半角方括号 + 空格分隔，方便眼睛扫读；颜色继承调用方的 span
+        return f"[{html.escape(name)}] "
 
     def _insert_text(self, text: str, source: str = "system"):
         """单条文本插入（保留给皮肤编辑器等老调用方；主字幕走 _flush_pending_text）。"""

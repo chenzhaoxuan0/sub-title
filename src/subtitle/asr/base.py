@@ -17,8 +17,12 @@ from typing import Callable, Optional
 import numpy as np
 
 
-# 结果回调签名：(text, is_final, source)
-OnResult = Callable[[str, bool, str], None]
+# 结果回调签名：(text, is_final, source, spk_id)
+# - spk_id: 当前这段文字归属的说话人聚类编号。
+#   开启 enable_speaker_diarization 的 funasr 引擎会传 int；
+#   其他引擎（sensevoice / aliyun / faster_whisper / 未开启 diarization 的 funasr）传 None。
+#   UI 层用 SpeakerNameMap.display(spk_id) 拿到「说话人 N」或用户自定义名。
+OnResult = Callable[[str, bool, str, Optional[int]], None]
 
 
 class AsrEngine(ABC):

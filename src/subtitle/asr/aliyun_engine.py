@@ -153,14 +153,15 @@ class AliyunEngine(AsrEngine):
             return
         text = self._extract_text(msg)
         if text:
-            self.on_result(text, is_final=False, source=self.source)
+            # 阿里云实时 API 不支持说话人区分（已验证），spk_id 永远 None
+            self.on_result(text, is_final=False, source=self.source, spk_id=None)
 
     def _on_sentence_end_cb(self, msg, *args):
         if self._closed:
             return
         text = self._extract_text(msg)
         if text:
-            self.on_result(text, is_final=True, source=self.source)
+            self.on_result(text, is_final=True, source=self.source, spk_id=None)
 
     def _on_completed_cb(self, msg, *args):
         print("[aliyun] 会话完成")
