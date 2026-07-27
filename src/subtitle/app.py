@@ -326,7 +326,18 @@ class SubtitleApp:
         return False
 
     def _on_started(self):
-        self.panel.set_status("运行中 · 实时识别")
+        # 检测 factory 是否因流式服务不可用而把 Nano 流式静默降级为段式
+        # （factory 在降级时给对应 source 的 AsrConfig 打 _nano_streaming_fallback 标记，
+        # 这是运行期属性，不会写进 config.yaml）。检测到就在状态栏提示一次。
+        fallback_sources = [
+            name for name, prof in (("🔊", self.cfg.asr.system), ("🎤", self.cfg.asr.mic))
+            if getattr(prof, "_nano_streaming_fallback", False)
+        ]
+        if fallback_sources:
+            suffix = "（" + "/".join(fallback_sources) + " 流式不可用，已降级段式）"
+        else:
+            suffix = ""
+        self.panel.set_status(f"运行中 · 实时识别{suffix}")
         self.tray.set_running(True)
         self.tray.notify("sub-title", "已开始实时识别")
         self.skin_runtime.on_recognition_start()

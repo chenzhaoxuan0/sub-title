@@ -227,8 +227,37 @@ class EngineConfigCard(SettingCard):
         for label, value in (("中文", "中文"), ("英文", "English"), ("日文", "Japanese")):
             self.nano_language_combo.addItem(label, value)
         lp.addWidget(_row("语言", "指定语言可提升准确率", self.nano_language_combo, vertical=True))
+
+        # 推理模式：段式（默认，零依赖） vs 流式（需本地 realtime-server）
+        self.nano_mode_combo = QComboBox()
+        self.nano_mode_combo.addItem("段式（默认，零依赖）", "segment")
+        self.nano_mode_combo.addItem("流式（需本地 realtime-server，逐字低延迟）", "streaming")
+        lp.addWidget(_row(
+            "推理模式",
+            "段式=简单低配，攒满段长出一段；流式=逐字输出延迟低，但需先起 "
+            "funasr-realtime-server 且更吃显存，连不上时自动回退段式",
+            self.nano_mode_combo, vertical=True,
+        ))
+        # 流式地址提示（仅流式模式显示）
+        self.nano_stream_addr_hint = QLabel(
+            "连接到 127.0.0.1:10095（funasr-realtime-server 默认端口）。\n"
+            "启动服务：funasr-realtime-server --endpoint-mode client"
+        )
+        self.nano_stream_addr_hint.setStyleSheet("color: #888; font-size: 11px;")
+        self.nano_stream_addr_hint.setWordWrap(True)
+        self.nano_stream_addr_hint.hide()
+        lp.addWidget(self.nano_stream_addr_hint)
+        # 流式 VRAM 警告（vLLM 预分配显存，低显存易 OOM）
+        self.nano_stream_vram_warn = QLabel("")
+        self.nano_stream_vram_warn.setStyleSheet("color: #c77; font-size: 11px;")
+        self.nano_stream_vram_warn.setWordWrap(True)
+        self.nano_stream_vram_warn.hide()
+        lp.addWidget(self.nano_stream_vram_warn)
+
         self.nano_segment_spin = self._segment_spin()
-        lp.addWidget(_row("攒段时长", "段式实时，越小延迟越低但易切词", self.nano_segment_spin, vertical=True))
+        lp.addWidget(_row("攒段时长", "仅段式模式用；越小延迟越低但易切词", self.nano_segment_spin, vertical=True))
+        # 联动：切模式 → 显隐相关控件 + 刷新 VRAM 警告
+        self.nano_mode_combo.currentIndexChanged.connect(self._on_nano_mode_changed)
         lp.addStretch(1)
         self.stack.addWidget(panel)
 
@@ -353,6 +382,25 @@ class EngineConfigCard(SettingCard):
         etype = self.engine_combo.currentData()
         self.stack.setCurrentIndex(self._STACK_INDEX.get(etype, 0))
 
+    def _on_nano_mode_changed(self) -> None:
+        """Fun-ASR-Nano 段式/流式联动：流式时禁用攒段时长、显示地址与 VRAM 警告。"""
+        streaming = self.nano_mode_combo.currentData() == "streaming"
+        # 攒段时长仅段式有意义；流式忽略，灰掉避免误操作
+        self.nano_segment_spin.setEnabled(not streaming)
+        self.nano_stream_addr_hint.setVisible(streaming)
+        if not streaming:
+            self.nano_stream_vram_warn.hide()
+            return
+        # VRAM 警告：vLLM 启动时预分配显存，低显存机器开流式易 OOM
+        vram = float(self._hardware_info.get("cuda_vram_gb", 0) or 0)
+        if not self._hardware_info.get("has_cuda") or vram < 6:
+            self.nano_stream_vram_warn.setText(
+                f"⚠️ 流式（vLLM）建议 ≥6GB 显存，当前检测到 {vram:g}GB，可能 OOM"
+            )
+            self.nano_stream_vram_warn.show()
+        else:
+            self.nano_stream_vram_warn.hide()
+
     def _apply_hardware_recommendation(self):
         engine_type, overrides = hardware.recommend_engine(self._hardware_info)
         self.engine_combo.setCurrentIndex(max(0, self.engine_combo.findData(engine_type)))
@@ -397,7 +445,10 @@ class EngineConfigCard(SettingCard):
             max(0, self.nano_device_combo.findData(asr.funasr_nano_device)))
         self.nano_language_combo.setCurrentIndex(
             max(0, self.nano_language_combo.findData(asr.funasr_nano_language)))
+        self.nano_mode_combo.setCurrentIndex(
+            max(0, self.nano_mode_combo.findData(getattr(asr, "funasr_nano_mode", "segment"))))
         self.nano_segment_spin.setValue(asr.funasr_nano_segment_seconds)
+        self._on_nano_mode_changed()
         self.qwen3_model_combo.setCurrentIndex(
             max(0, self.qwen3_model_combo.findData(asr.qwen3_asr_model)))
         self.qwen3_device_combo.setCurrentIndex(
@@ -428,6 +479,7 @@ class EngineConfigCard(SettingCard):
         asr.sensevoice_segment_seconds = self.sv_segment_spin.value()
         asr.funasr_nano_device = self.nano_device_combo.currentData()
         asr.funasr_nano_language = self.nano_language_combo.currentData()
+        asr.funasr_nano_mode = self.nano_mode_combo.currentData()
         asr.funasr_nano_segment_seconds = self.nano_segment_spin.value()
         asr.qwen3_asr_model = self.qwen3_model_combo.currentData()
         asr.qwen3_asr_device = self.qwen3_device_combo.currentData()
