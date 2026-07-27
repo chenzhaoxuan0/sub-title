@@ -1013,16 +1013,22 @@ class SubtitlePanel(QWidget):
             # 注意：split("\n") 在末尾有 \n 时会多一个空串元素，保留它能确保
             # 下面的"每两个段之间插换行"逻辑自动在末尾也补上换行。
             segments = processed.split("\n")
+            color, icon = self._source_style(source)
+            prefix = self._speaker_prefix(source, spk_id)
+            # icon/prefix 只在「这条 merged 项的第一个非空段」插一次。
+            # 之前每段都插 → 自动分行把一句话切成多行时，每行行首都堆一个 🔊，
+            # 刷屏且难读。同一句的后续分行段共享同一来源图标，不再重复。
+            icon_emitted = False
             for i, seg in enumerate(segments):
                 if i > 0:
                     cursor.insertText("\n")
                 if seg:
-                    color, icon = self._source_style(source)
-                    # 说话人区分：spk_id 非空时在文字前加 [显示名] 颜色块
-                    prefix = self._speaker_prefix(source, spk_id)
+                    this_icon = icon if not icon_emitted else ""
+                    this_prefix = prefix if not icon_emitted else ""
+                    icon_emitted = True
                     safe = html.escape(seg)
                     cursor.insertHtml(
-                        f'<span style="color:{color};">{prefix}{icon}{safe}</span>'
+                        f'<span style="color:{color};">{this_prefix}{this_icon}{safe}</span>'
                     )
             self._trim_if_needed()
         cursor.endEditBlock()
