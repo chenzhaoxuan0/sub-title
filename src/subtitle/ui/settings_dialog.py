@@ -164,11 +164,13 @@ class EngineConfigCard(SettingCard):
         lp = QVBoxLayout(panel)
         lp.setContentsMargins(0, 0, 0, 0)
         lp.setSpacing(4)
-        try:
-            import faster_whisper  # noqa: F401
-            self._fw_available = True
-        except ImportError:
-            self._fw_available = False
+        # 关键性能：用 find_spec 探测 faster_whisper 是否安装，**不要真正 import**。
+        # import faster_whisper 会拖进 ctranslate2(~2.7s) + tokenizers，首次约 3s，
+        # 而 SettingsDialog 有两张引擎卡片（电脑声音+麦克风）→ 卡 ~3s 才打开。
+        # 这里只需知道「装没装」来决定是否禁用控件，实际引擎创建在 asr/factory
+        # 里按需 import，与此处无关。
+        import importlib.util
+        self._fw_available = importlib.util.find_spec("faster_whisper") is not None
         self.fw_model_combo = QComboBox()
         for name, label in [("large-v3-turbo", "large-v3-turbo（推荐，快+准）"),
                             ("large-v3", "large-v3（最准，慢）"),
