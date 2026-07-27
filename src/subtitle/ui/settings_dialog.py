@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, QEvent, QPoint
+from PySide6.QtCore import Qt, QTimer, QEvent, QPoint, QThread, Signal
 from PySide6.QtGui import QFont, QColor, QCloseEvent
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QSpinBox,
@@ -23,6 +23,7 @@ from ..config import Config, AsrConfig
 from .. import credentials, hardware
 from ..asr._install import (
     all_local_engines, check_engine_deps, recommended_install_command,
+    scan_conda_envs, CondaEnvInfo,
 )
 from .theme_engine import (
     Theme, ThemeColors, ThemeGeometry, ThemeManager,
@@ -446,6 +447,24 @@ class EngineConfigCard(SettingCard):
         asr.faster_whisper_vad_filter = self.fw_vad_check.isChecked()
 
 
+class _CondaScanWorker(QThread):
+    """后台扫描系统 conda 环境（启动多个子进程，不能阻塞 UI 线程）。
+
+    扫描完通过 finished 信号把结果列表回主线程。参照 app.py _EngineWorker 的 QThread 模式。
+    设为 daemon 线程，避免主进程退出时因 worker 还在跑子进程而卡住（测试场景尤其重要）。
+    """
+
+    finished = Signal(object)   # list[CondaEnvInfo]
+
+    def run(self):
+        try:
+            envs = scan_conda_envs()
+        except Exception as e:
+            envs = []   # 扫描整体失败时给空列表，UI 显示"未发现"
+            print(f"[conda-scan] 扫描失败: {e}")
+        self.finished.emit(envs)
+
+
 class SettingsDialog(QDialog):
     """设置对话框（Fluent 风格）。"""
 
@@ -707,6 +726,16 @@ class SettingsDialog(QDialog):
         self._engine_cards_container = SettingCardGroup("本地引擎")
         v.addWidget(self._engine_cards_container)
 
+        # ---- 系统 conda 环境区块（发现用户已有的环境，引导用 run.bat 启动）----
+        self._conda_cards_container = SettingCardGroup("系统 conda 环境（可用于本地引擎）")
+        self._conda_scan_status = QLabel("正在扫描系统 conda 环境…")
+        self._conda_scan_status.setStyleSheet("color: #888; font-size: 11px; padding: 4px 0;")
+        self._conda_cards_container.add_card(
+            SettingCard("", "", self._conda_scan_status, vertical=True)
+        )
+        v.addWidget(self._conda_cards_container)
+        self._conda_worker: _CondaScanWorker | None = None
+
         # ---- 阿里云提示卡片 ----
         api_hint = QLabel(
             "阿里云 API 是流式云端识别，不依赖 torch / funasr 等本地模型库。\n"
@@ -719,16 +748,20 @@ class SettingsDialog(QDialog):
         v.addWidget(api_card)
 
         v.addStretch(1)
-        # 首次填充硬件摘要 + 引擎卡片
-        self._refresh_engine_mgmt()
+        # 首次填充硬件摘要 + 引擎卡片（快，无副作用）。
+        # conda 扫描涉及子进程（慢），延迟到用户首次切到本页时再触发（懒加载），
+        # 避免构造对话框时就启动后台线程（测试场景会卡主进程退出）。
+        self._refresh_engine_mgmt(skip_conda=True)
+        self._conda_scan_pending = True   # 待首次切页时扫描
         return self._wrap_scroll(tab)
 
-    def _refresh_engine_mgmt(self) -> None:
+    def _refresh_engine_mgmt(self, skip_conda: bool = False) -> None:
         """重新检测硬件 + 刷新所有引擎卡片状态。
 
         用户装完依赖（pip install funasr/torch 等）后点「重新检测」，find_spec 会实时
         探测到新装的包，引擎卡片立即更新为「已就绪」。硬件信息（内存/显存）也一并刷新。
         hardware.detect() 有缓存，这里用 force=True 强制重扫。
+        skip_conda=True 时跳过 conda 环境扫描（构造对话框时用，避免启动后台线程）。
         """
         # 强制重扫硬件（psutil 内存、torch CUDA 都实时查）
         hw = hardware.detect(force=True)
@@ -751,6 +784,120 @@ class SettingsDialog(QDialog):
                 w.deleteLater()
         for info in all_local_engines():
             self._engine_cards_container.add_card(self._build_engine_install_card(info, has_cuda))
+
+        # conda 环境扫描（异步后台线程）。skip_conda=True 时不触发（构造时用）。
+        if not skip_conda:
+            self._start_conda_scan()
+
+    def _start_conda_scan(self) -> None:
+        """启动后台线程扫描系统 conda 环境（避免子进程阻塞 UI）。"""
+        # 复用扫描状态提示（首次显示"扫描中"，重扫时也恢复）
+        self._conda_scan_status.setText("正在扫描系统 conda 环境…")
+        # 清空旧 conda 卡片（保留状态提示卡片本身）
+        layout = self._conda_cards_container._cards_layout
+        # 跳过第 0 个（状态提示卡片），删除其余
+        while layout.count() > 1:
+            item = layout.takeAt(layout.count() - 1)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        # 已有 worker 在跑就等它（最多 8s），避免并发扫描堆积子进程
+        if self._conda_worker is not None and self._conda_worker.isRunning():
+            self._conda_worker.wait(8000)
+        # 启动后台扫描线程（daemon，finished 自动清理引用）
+        self._conda_worker = _CondaScanWorker(self)
+        self._conda_worker.finished.connect(self._on_conda_scan_done)
+        self._conda_worker.start()
+
+    def _on_conda_scan_done(self, envs: object) -> None:
+        """后台扫描完成，渲染 conda 环境卡片。"""
+        # 清理 worker 引用（让 daemon 线程对象可被 GC）
+        self._conda_worker = None
+        env_list: list[CondaEnvInfo] = envs if isinstance(envs, list) else []
+        layout = self._conda_cards_container._cards_layout
+
+        if not env_list:
+            self._conda_scan_status.setText(
+                "未发现 conda 环境。如需本地引擎，请先安装 Anaconda/Miniconda，"
+                "再用「本地引擎」区的命令装依赖。"
+            )
+            return
+
+        # 有发现的 env：隐藏状态提示，渲染各环境卡片
+        self._conda_scan_status.setText(
+            f"发现 {len(env_list)} 个 Python 环境（按住 Shift 选中命令框可全选复制）："
+        )
+        for env in env_list:
+            layout.addWidget(self._build_conda_env_card(env))
+
+    def _build_conda_env_card(self, env: CondaEnvInfo) -> SettingCard:
+        """构造单个 conda 环境的卡片：状态徽标 + 依赖详情 + 引导/复制按钮。"""
+        if env.error:
+            title = f"conda env: {env.name}　·　<span style='color:#888'>探测失败</span>"
+            content = f"<span style='color:#888;font-size:11px'>{env.error}</span>"
+            return SettingCard(title, content, None, vertical=True)
+
+        if env.has_any_local_engine:
+            engines = "、".join(env.ready_engines) if env.ready_engines else "部分本地引擎"
+            cuda_part = f"+ CUDA（{env.gpu_name}）" if env.has_cuda else "（无 CUDA，CPU 推理）"
+            status = f"✅ 含 {engines} {cuda_part}"
+            status_color = "#4caf50"
+            deps = []
+            if env.has_torch:
+                deps.append("torch")
+            if env.has_funasr:
+                deps.append("funasr")
+            if env.has_qwen_asr:
+                deps.append("qwen_asr")
+            if env.has_faster_whisper:
+                deps.append("faster_whisper")
+            content = (
+                f"<span style='color:#888;font-size:11px'>"
+                f"Python {env.python_version or '?'} · 依赖：{', '.join(deps)}<br>"
+                f"此环境可运行本地引擎。用以下命令启动开发版（非 exe）即可使用本地引擎 + GPU：</span>"
+            )
+            # 复制启动命令（run.bat 等效）：conda activate <name> && python -m subtitle
+            launch_cmd = f"conda activate {env.name}\npython -m subtitle"
+        else:
+            status = "⚪ 无本地引擎依赖"
+            status_color = "#888"
+            content = (
+                f"<span style='color:#888;font-size:11px'>"
+                f"Python {env.python_version or '?'} · 此环境未装 torch/funasr，"
+                f"不影响纯 API 模式，可忽略。</span>"
+            )
+            launch_cmd = ""
+
+        title = f"conda env: {env.name}　·　<span style='color:{status_color}'>{status}</span>"
+
+        # 命令框 + 复制按钮（仅有本地引擎依赖时显示）
+        if launch_cmd:
+            cmd_box = QTextEdit()
+            cmd_box.setPlainText(launch_cmd)
+            cmd_box.setReadOnly(True)
+            cmd_box.setFixedHeight(58)
+            cmd_box.setStyleSheet(
+                "QTextEdit { background: rgba(128,128,128,0.12);"
+                " border: 1px solid rgba(128,128,128,0.3); border-radius: 4px;"
+                " font-family: Consolas, 'Courier New', monospace; font-size: 12px; padding: 4px; }"
+            )
+            copy_btn = QPushButton("📋 复制启动命令")
+            copy_btn.setCursor(Qt.PointingHandCursor)
+            def _copy(_checked=False, _cmd: str = launch_cmd, _btn: QPushButton = copy_btn):
+                QApplication.clipboard().setText(_cmd)
+                QToolTip.showText(_btn.mapToGlobal(QPoint(0, -28)), "已复制到剪贴板", _btn)
+            copy_btn.clicked.connect(_copy)
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            row.addWidget(cmd_box, 1)
+            row.addWidget(copy_btn)
+            cmd_w = QWidget()
+            cmd_w.setLayout(row)
+            return SettingCard(title, content, cmd_w, vertical=True)
+
+        return SettingCard(title, content, None, vertical=True)
 
     def _build_engine_install_card(self, info, has_cuda: bool) -> SettingCard:
         """构造单个引擎的安装卡片：状态徽标 + 用途 + 安装命令框 + 复制按钮。"""
@@ -1194,9 +1341,14 @@ class SettingsDialog(QDialog):
         QTimer.singleShot(1200, lambda: self.copy_btn.setText("📋 复制全部"))
 
     def _on_tab_changed(self, idx: int):
+        text = self.tabs.tabText(idx)
         # 用 tabText 判断「文稿」tab：tab 顺序变了不破坏这里。
-        if self.tabs.tabText(idx) == "文稿":
+        if text == "文稿":
             self._refresh_transcript()
+        # 首次切到「引擎管理」页时触发 conda 环境扫描（懒加载，避免构造时启动后台线程）。
+        if text == "引擎管理" and getattr(self, "_conda_scan_pending", False):
+            self._conda_scan_pending = False
+            self._start_conda_scan()
 
     def _on_theme_preview(self):
         name = self.theme_combo.currentData()

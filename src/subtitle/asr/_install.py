@@ -170,3 +170,223 @@ def missing_dep_hint(engine_type: str, has_cuda: bool = False) -> str | None:
     cmd = recommended_install_command(engine_type, has_cuda)
     deps_str = "、".join(missing)
     return f"{name} 依赖缺失：{deps_str}。请在终端执行：\n{cmd}"
+
+
+# ============================================================
+# 系统环境扫描：发现用户已有的 conda/Python 环境及其本地引擎依赖
+#
+# 用途：纯 API 模式的 exe 内部没有 torch/funasr，但用户系统里可能装了
+#       Anaconda + 完整本地引擎环境。这里通过子进程调用各环境的 python.exe
+#       探测依赖（独立进程，与 exe 解释器隔离，无 ABI 崩溃风险），
+#       让用户知道"本地引擎环境在哪、状态如何、怎么用 run.bat 启动"。
+# ============================================================
+
+
+@dataclass(frozen=True)
+class CondaEnvInfo:
+    """一个已发现的系统 Python/conda 环境及其依赖状态。"""
+
+    name: str               # 环境名（subtitle / base / venv 名）
+    python_path: str        # python.exe 绝对路径
+    python_version: str     # "3.11.15"（探测失败为空）
+    has_torch: bool = False
+    has_funasr: bool = False
+    has_qwen_asr: bool = False
+    has_faster_whisper: bool = False
+    has_cuda: bool = False
+    gpu_name: str = ""
+    # 探测是否出错（python.exe 不存在 / 超时 / 崩溃）
+    error: str = ""
+
+    @property
+    def has_any_local_engine(self) -> bool:
+        """是否含至少一个本地引擎依赖（决定要不要在 UI 高亮引导）。"""
+        return self.has_torch or self.has_funasr or self.has_qwen_asr or self.has_faster_whisper
+
+    @property
+    def ready_engines(self) -> list[str]:
+        """此环境可用的本地引擎显示名列表（供 UI 展示）。"""
+        out = []
+        if self.has_funasr and self.has_torch:
+            out.append("FunASR/SenseVoice/Nano")
+        if self.has_qwen_asr:
+            out.append("Qwen3-ASR")
+        if self.has_faster_whisper:
+            out.append("faster-whisper")
+        return out
+
+
+# 子进程探测脚本：输出 JSON，含各依赖是否存在 + CUDA 信息。
+# 用 importlib.util.find_spec 探测（不真 import 重量级模块），仅 torch 在时才 import 查 CUDA。
+_PROBE_SCRIPT = (
+    "import json,importlib.util as u\n"
+    "deps=['torch','funasr','qwen_asr','faster_whisper']\n"
+    "out={d: u.find_spec(d) is not None for d in deps}\n"
+    "out['cuda']=False; out['gpu']=''\n"
+    "if out['torch']:\n"
+    "    try:\n"
+    "        import torch\n"
+    "        out['cuda']=bool(torch.cuda.is_available())\n"
+    "        if out['cuda']:\n"
+    "            out['gpu']=torch.cuda.get_device_name(0)\n"
+    "    except Exception as e:\n"
+    "        out['torch_err']=str(e)[:100]\n"
+    "print(json.dumps(out))\n"
+)
+
+
+def _candidate_env_dirs() -> list[str]:
+    """枚举可能存在 conda 环境的目录（跨平台，不依赖 PATH）。
+
+    优先级：
+      1. ~/.conda/environments.txt（conda 官方维护，最可靠，记录所有 env 路径）
+      2. 常见 conda 安装根的 envs 目录 + base 根目录
+    """
+    import os
+    import sys
+
+    env_paths: list[str] = []
+    home = os.path.expanduser("~")
+
+    # 1) ~/.conda/environments.txt：每行一个环境根目录（含 base 和各 env）
+    env_txt = os.path.join(home, ".conda", "environments.txt")
+    try:
+        with open(env_txt, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and os.path.isabs(line):
+                    env_paths.append(line)
+    except (OSError, UnicodeDecodeError):
+        pass
+
+    # 2) 候选 conda 安装根（Windows / macOS / Linux 常见位置）
+    candidates: list[str] = []
+    if sys.platform == "win32":
+        for env in ("PROGRAMDATA", "LOCALAPPDATA", "USERPROFILE"):
+            base = os.environ.get(env)
+            if base:
+                candidates.append(os.path.join(base, "miniconda3"))
+                candidates.append(os.path.join(base, "Anaconda3"))
+    else:
+        candidates.append(os.path.join(home, "miniconda3"))
+        candidates.append(os.path.join(home, "anaconda3"))
+        candidates.append("/opt/miniconda3")
+        candidates.append("/opt/anaconda3")
+
+    for root in candidates:
+        # base 根本身
+        if root not in env_paths:
+            env_paths.append(root)
+        # envs 子目录下的各环境
+        envs_dir = os.path.join(root, "envs")
+        try:
+            for name in os.listdir(envs_dir):
+                env_paths.append(os.path.join(envs_dir, name))
+        except (OSError, FileNotFoundError):
+            pass
+
+    # 去重（保序）
+    seen = set()
+    unique = []
+    for p in env_paths:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
+
+
+def _python_exe_of(env_dir: str) -> str | None:
+    """环境目录里的 python 可执行文件路径（Windows .exe / Unix bin/python）。"""
+    import os
+    import sys
+
+    if sys.platform == "win32":
+        exe = os.path.join(env_dir, "python.exe")
+    else:
+        exe = os.path.join(env_dir, "bin", "python")
+    return exe if os.path.isfile(exe) else None
+
+
+def _probe_env(python_exe: str) -> dict:
+    """用子进程调 python.exe 探测依赖。返回探测结果 dict。
+
+    子进程独立运行，与当前解释器隔离（即使 ABI 不兼容也不影响主进程）。
+    单个 env 超时（10s）不阻塞整体扫描。
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [python_exe, "-c", _PROBE_SCRIPT],
+            capture_output=True, text=True, timeout=15,
+            # 避免继承当前进程的环境变量导致 conda 激活冲突
+            env=None,
+        )
+        if result.returncode != 0:
+            return {"error": f"退出码 {result.returncode}: {result.stderr.strip()[:120]}"}
+        # 取最后一行非空输出（避免 stderr 干扰）
+        lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+        if not lines:
+            return {"error": "无输出"}
+        import json
+        return json.loads(lines[-1])
+    except subprocess.TimeoutExpired:
+        return {"error": "探测超时(>15s)"}
+    except (json.JSONDecodeError, ValueError) as e:
+        return {"error": f"解析失败: {e}"}
+    except (OSError, FileNotFoundError) as e:
+        return {"error": f"无法启动: {e}"}
+
+
+def scan_conda_envs() -> list[CondaEnvInfo]:
+    """扫描系统 conda/Python 环境，返回每个环境的依赖状态。
+
+    同步阻塞函数（会逐个启动子进程），调用方应在后台线程跑。
+    返回所有发现的环境（含无依赖的），按"有本地引擎依赖的优先"排序。
+    """
+    import os
+    import subprocess
+
+    results: list[CondaEnvInfo] = []
+    for env_dir in _candidate_env_dirs():
+        python_exe = _python_exe_of(env_dir)
+        if python_exe is None:
+            continue
+        # 环境名：目录名（subtitle / base / miniconda3）
+        name = os.path.basename(env_dir.rstrip(os.sep)) or env_dir
+
+        # 先取 python 版本（快，单独一条命令避免和依赖探测耦合）
+        py_ver = ""
+        try:
+            r = subprocess.run(
+                [python_exe, "--version"], capture_output=True, text=True, timeout=8,
+            )
+            # "Python 3.11.15"
+            ver_line = (r.stdout or r.stderr).strip()
+            py_ver = ver_line.replace("Python ", "")
+        except Exception:
+            pass
+
+        probe = _probe_env(python_exe)
+        if "error" in probe and not any(k in probe for k in ("torch", "funasr")):
+            results.append(CondaEnvInfo(
+                name=name, python_path=python_exe, python_version=py_ver, error=probe["error"],
+            ))
+            continue
+
+        results.append(CondaEnvInfo(
+            name=name,
+            python_path=python_exe,
+            python_version=py_ver,
+            has_torch=bool(probe.get("torch")),
+            has_funasr=bool(probe.get("funasr")),
+            has_qwen_asr=bool(probe.get("qwen_asr")),
+            has_faster_whisper=bool(probe.get("faster_whisper")),
+            has_cuda=bool(probe.get("cuda")),
+            gpu_name=str(probe.get("gpu", "")),
+        ))
+
+    # 有本地引擎依赖的排前面，方便用户一眼看到
+    results.sort(key=lambda e: (not e.has_any_local_engine, e.name))
+    return results
+
