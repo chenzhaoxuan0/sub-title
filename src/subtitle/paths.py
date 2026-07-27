@@ -25,6 +25,39 @@ APP_NAME = "sub-title"
 APP_AUTHOR = "chenzhaoxuan0"   # Windows 上会用作 %APPDATA%/Author/AppName/ 的中间目录
 
 
+def resource_dir() -> Path:
+    """只读资源根目录（打包后内嵌的 themes/ 等资源在它下面）。
+
+    - 源码开发模式：项目根（parents[2]），与历史行为一致。
+    - PyInstaller 打包后：sys._MEIPASS（onedir 模式即 exe 同级 _internal，onefile 模式即临时解压目录）。
+    - py2app（macOS .app）：app bundle 内的 Resources（通过 sys._MEIPASS 同样可见）。
+
+    供 theme_engine / config 的 LEGACY 资源路径统一调用，避免散落多处的
+    `Path(__file__).resolve().parents[2]` 在打包后失效。
+    """
+    if getattr(sys, "frozen", False):
+        # PyInstaller / py2app 都会设置 _MEIPASS 指向资源解压根。
+        base = getattr(sys, "_MEIPASS", None)
+        if base:
+            return Path(base)
+        # 兜底：frozen 但没有 _MEIPASS（极少见），退到可执行文件同级。
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+def default_font_family() -> str:
+    """CJK 字幕默认字体，按平台选系统原生字体（避免 Mac 上找不到 Microsoft YaHei）。
+
+    各平台都能渲染中文且预装：Windows 微软雅黑、macOS 苹方、Linux 思源黑体。
+    用户在主题里显式指定的字体优先级仍高于此默认。
+    """
+    if sys.platform == "darwin":
+        return "PingFang SC"
+    if sys.platform == "win32":
+        return "Microsoft YaHei"
+    return "Noto Sans CJK SC"
+
+
 def _platformdirs():
     """懒加载 platformdirs，避免 import 阶段硬依赖。"""
     try:

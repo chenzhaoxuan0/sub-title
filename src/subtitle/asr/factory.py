@@ -5,6 +5,26 @@
 from __future__ import annotations
 
 from .base import AsrEngine, OnResult
+from ._install import missing_dep_hint
+
+
+def _missing_dep(engine_type: str) -> "str | None":
+    """返回引擎缺少依赖时的中文提示；依赖齐全返回 None。
+
+    依赖清单与平台/硬件感知的安装命令统一由 asr/_install.py 提供，
+    与「设置 → 引擎管理」标签页、各引擎 load() 报错文案保持一致。
+
+    引擎的真实 import 发生在各自 load() 里（延迟到 worker 线程），但依赖缺失
+    若在那时才暴露，用户只看到一条 traceback。这里在工厂阶段用 find_spec 探测
+    （不真正 import，开销极低），给出可操作的安装提示。
+    """
+    # has_cuda 影响 torch 安装命令（GPU 走 CUDA 索引），探测一次即可。
+    try:
+        from .. import hardware
+        has_cuda = bool(hardware.detect().get("has_cuda"))
+    except Exception:
+        has_cuda = False
+    return missing_dep_hint(engine_type, has_cuda=has_cuda)
 
 
 def create_engine(cfg, on_result: OnResult, source: str = "system") -> AsrEngine:
@@ -23,6 +43,11 @@ def create_engine(cfg, on_result: OnResult, source: str = "system") -> AsrEngine
             f"本 session 降级为 funasr（请在设置里切引擎或关闭说话人区分）"
         )
         engine_type = "funasr"
+
+    # 工厂阶段预检依赖：缺失就抛友好提示，而不是让 load() 在 worker 线程里崩成 traceback。
+    missing = _missing_dep(engine_type)
+    if missing:
+        raise ImportError(missing)
 
     if engine_type == "funasr":
         from .funasr_engine import FunAsrEngine

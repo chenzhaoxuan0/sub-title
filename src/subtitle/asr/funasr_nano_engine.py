@@ -28,7 +28,9 @@ class FunAsrNanoEngine(AsrEngine):
         from funasr import AutoModel
 
         model_id = getattr(self.cfg, "funasr_nano_model", "FunAudioLLM/Fun-ASR-Nano-2512")
-        device = getattr(self.cfg, "funasr_nano_device", "cuda")
+        # 跨平台设备解析：cuda 不可用（macOS/CPU torch）时降级，避免硬崩。
+        from ._device import resolve_device
+        device = resolve_device(getattr(self.cfg, "funasr_nano_device", "cuda"))
         seconds = float(getattr(self.cfg, "funasr_nano_segment_seconds", 2.0))
         self._segment_samples = max(1600, int(seconds * 16000))
         print(f"[funasr_nano] 从 ModelScope 加载 {model_id} (device={device})...")

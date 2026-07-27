@@ -41,7 +41,9 @@ class SenseVoiceEngine(AsrEngine):
     def load(self) -> None:
         from funasr import AutoModel
         model_id = getattr(self.cfg, "sensevoice_model", "iic/SenseVoiceSmall")
-        device = getattr(self.cfg, "sensevoice_device", "cpu")
+        # 跨平台设备解析：默认 cpu（Mac 友好）；若用户手填 cuda 也会先探测再降级。
+        from ._device import resolve_device
+        device = resolve_device(getattr(self.cfg, "sensevoice_device", "cpu"))
         seg_sec = getattr(self.cfg, "sensevoice_segment_seconds", 2.0)
         print(f"[sensevoice] 加载 {model_id} (device={device})，首次会下载(~254MB)...")
         self.model = AutoModel(

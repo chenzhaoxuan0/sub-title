@@ -14,8 +14,10 @@ try:
 except ImportError:  # yaml 未装时给个占位，setup 后会有
     yaml = None
 
-# 旧版位置（项目根 / CWD）—— 仅供迁移逻辑识别，新代码用 default_config_path()
-_LEGACY_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
+# 旧版位置（项目根 / CWD）—— 仅供迁移逻辑识别，新代码用 default_config_path()。
+# 打包后这个路径在只读资源根下（PyInstaller _MEIPASS），文件不存在，迁移自然跳过。
+from .paths import resource_dir as _resource_dir, default_font_family as _default_font_family
+_LEGACY_CONFIG_PATH = _resource_dir() / "config.yaml"
 
 
 def default_config_path() -> Path:
@@ -117,7 +119,8 @@ class AsrConfig:
 
 @dataclass
 class UiConfig:
-    font_family: str = "Microsoft YaHei"
+    # CJK 字幕默认字体按平台选原生字体（Mac 用苹方，避免找不到微软雅黑）。
+    font_family: str = field(default_factory=_default_font_family)
     font_size: int = 22
     window_opacity: float = 0.88
     max_chars: int = 20000

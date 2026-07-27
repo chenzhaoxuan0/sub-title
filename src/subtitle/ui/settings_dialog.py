@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, QEvent
+from PySide6.QtCore import Qt, QTimer, QEvent, QPoint
 from PySide6.QtGui import QFont, QColor, QCloseEvent
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QSpinBox,
@@ -16,11 +16,14 @@ from PySide6.QtWidgets import (
     QTextEdit, QPushButton, QFontComboBox, QApplication, QMessageBox,
     QLineEdit, QStackedWidget, QDoubleSpinBox, QColorDialog, QScrollArea,
     QFrame, QSizePolicy, QFileDialog, QListWidget, QListWidgetItem,
-    QAbstractItemView,
+    QAbstractItemView, QToolTip,
 )
 
 from ..config import Config, AsrConfig
 from .. import credentials, hardware
+from ..asr._install import (
+    all_local_engines, check_engine_deps, recommended_install_command,
+)
 from .theme_engine import (
     Theme, ThemeColors, ThemeGeometry, ThemeManager,
     get_theme_manager, BUILTIN_THEMES, PROTECTED_THEMES,
@@ -489,6 +492,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.tabs, 1)
 
         self.tabs.addTab(self._build_recognition_tab(), "识别")
+        self.tabs.addTab(self._build_engine_mgmt_tab(), "引擎管理")
         self.tabs.addTab(self._build_speaker_tab(), "说话人")
         self.tabs.addTab(self._build_appearance_tab(), "外观")
         self.tabs.addTab(self._build_behavior_tab(), "行为")
@@ -652,6 +656,98 @@ class SettingsDialog(QDialog):
 
         v.addStretch(1)
         return self._wrap_scroll(tab)
+
+    # ---------- 标签页：引擎管理 ----------
+    def _build_engine_mgmt_tab(self) -> QWidget:
+        """本地引擎依赖管理页：展示各引擎安装状态，未装时给精确安装命令+一键复制。
+
+        纯 API（阿里云）模式无需任何安装；本地引擎按需装，装完重启程序生效。
+        依赖探测用 find_spec（开销极低），设置对话框每次打开都重建实例，
+        所以用户装完依赖重开设置即可看到「已就绪」——无需运行时重扫。
+        """
+        tab = QWidget()
+        v = QVBoxLayout(tab)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(8)
+
+        hw = hardware.detect()
+        has_cuda = bool(hw.get("has_cuda"))
+        gpus = f"{hw.get('gpu_name','无')}" if has_cuda else "无 CUDA"
+
+        # ---- 顶部说明卡片 ----
+        intro = QLabel(
+            "🟢 阿里云 API 模式无需安装任何依赖，开箱即用（仅需在「识别」页填凭证）。\n"
+            "🟡 本地引擎（SenseVoice / FunASR 等）按需安装：复制下方命令到终端执行，"
+            "装完「重启程序」即可在「识别」页选用。\n"
+            f"当前硬件：{hw.get('cpu_cores',0)} 核 / {hw.get('ram_gb',0):g}GB 内存 / GPU：{gpus}"
+        )
+        intro.setStyleSheet("color: #888; font-size: 12px;")
+        intro.setWordWrap(True)
+        intro_card = SettingCard("引擎依赖管理", "", intro, vertical=True)
+        v.addWidget(intro_card)
+
+        # ---- 各本地引擎卡片 ----
+        g = SettingCardGroup("本地引擎")
+        for info in all_local_engines():
+            g.add_card(self._build_engine_install_card(info, has_cuda))
+        v.addWidget(g)
+
+        # ---- 阿里云提示卡片 ----
+        api_hint = QLabel(
+            "阿里云 API 是流式云端识别，不依赖 torch / funasr 等本地模型库。\n"
+            "只需在「识别」标签页的「阿里云凭证」卡片填入 AccessKey/AppKey 即可。\n"
+            "凭证存于系统保险箱，跨平台通用。"
+        )
+        api_hint.setStyleSheet("color: #888; font-size: 11px;")
+        api_hint.setWordWrap(True)
+        api_card = SettingCard("阿里云 API（无需安装）", "", api_hint, vertical=True)
+        v.addWidget(api_card)
+
+        v.addStretch(1)
+        return self._wrap_scroll(tab)
+
+    def _build_engine_install_card(self, info, has_cuda: bool) -> SettingCard:
+        """构造单个引擎的安装卡片：状态徽标 + 用途 + 安装命令框 + 复制按钮。"""
+        ready, missing = check_engine_deps(info.engine_type)
+        status_text = "✅ 已就绪" if ready else f"⚠️ 未安装（缺少 {'、'.join(missing)}）"
+        status_color = "#4caf50" if ready else "#d94c4c"
+
+        # 卡片内容：引擎名 + 状态徽标（标题行）；用途 + 体积（说明行）
+        title = f"{info.display_name}　·　<span style='color:{status_color}'>{status_text}</span>"
+        content = f"{info.description}<br><span style='color:#888;font-size:11px'>体积：{info.approx_size}</span>"
+
+        # 命令文本框（只读、可选中）+ 复制按钮
+        cmd = recommended_install_command(info.engine_type, has_cuda)
+        cmd_box = QTextEdit()
+        cmd_box.setPlainText(cmd)
+        cmd_box.setReadOnly(True)
+        cmd_box.setFixedHeight(58 if "\n" in cmd else 34)
+        cmd_box.setStyleSheet(
+            "QTextEdit { background: rgba(128,128,128,0.12);"
+            " border: 1px solid rgba(128,128,128,0.3); border-radius: 4px;"
+            " font-family: Consolas, 'Courier New', monospace; font-size: 12px; padding: 4px; }"
+        )
+
+        copy_btn = QPushButton("📋 复制")
+        copy_btn.setCursor(Qt.PointingHandCursor)
+        # 闭包捕获当前命令（循环变量 info/cmd 需默认参数固定）
+        def _copy(_checked=False, _cmd: str = cmd, _btn: QPushButton = copy_btn):
+            QApplication.clipboard().setText(_cmd)
+            QToolTip.showText(_btn.mapToGlobal(QPoint(0, -28)), "已复制到剪贴板", _btn)
+
+        copy_btn.clicked.connect(_copy)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(cmd_box, 1)
+        row.addWidget(copy_btn)
+        cmd_w = QWidget()
+        cmd_w.setLayout(row)
+
+        # 用 vertical 卡片：标题(含状态)在上，命令区在下占满宽度
+        card = SettingCard(title, content, cmd_w, vertical=True)
+        return card
 
     # ---------- 标签页2：说话人管理 ----------
     def _build_speaker_tab(self) -> QWidget:

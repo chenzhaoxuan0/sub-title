@@ -30,28 +30,41 @@ class Qwen3AsrEngine(AsrEngine):
             import torch
             from qwen_asr import Qwen3ASRModel
         except ImportError as error:
+            import platform
+            hint = (
+                "运行 scripts\\install_qwen3_asr.bat"
+                if platform.system() == "Windows"
+                else "pip install qwen-asr"
+            )
             raise ImportError(
-                "Qwen3-ASR 未安装。请运行 scripts\\install_qwen3_asr.bat，"
-                "或在 subtitle 环境执行：pip install qwen-asr"
+                f"Qwen3-ASR 未安装。{hint}，"
+                "或直接执行：pip install qwen-asr"
             ) from error
         model_id = getattr(self.cfg, "qwen3_asr_model", "Qwen/Qwen3-ASR-0.6B")
-        device = getattr(self.cfg, "qwen3_asr_device", "cuda")
+        # 跨平台设备解析：cuda 不可用（macOS/CPU torch）时降级，避免硬崩。
+        from ._device import resolve_device, cuda_available
+        device = resolve_device(getattr(self.cfg, "qwen3_asr_device", "cuda"))
         seconds = float(getattr(self.cfg, "qwen3_asr_segment_seconds", 2.0))
         quantization = getattr(self.cfg, "qwen3_asr_quantization", "none")
         self._segment_samples = max(1600, int(seconds * 16000))
         if quantization not in {"none", "4bit"}:
             raise ValueError("Qwen3-ASR 量化模式仅支持 none 或 4bit")
         if quantization == "4bit":
-            if device == "cpu":
-                raise ValueError("Qwen3-ASR 4bit 量化仅支持 CUDA；CPU 请使用原始精度或 faster-whisper INT8。")
+            # bitsandbytes 仅 CUDA 可用（无 macOS wheel，MPS/CPU 都不支持）。
+            if device != "cuda" or not cuda_available():
+                raise ValueError(
+                    "Qwen3-ASR 4bit 量化仅支持 CUDA；CPU/MPS 或无 CUDA 时请用原始精度（none）"
+                    "或 faster-whisper INT8。"
+                )
             try:
                 import bitsandbytes  # noqa: F401
             except ImportError as error:
                 raise ImportError(
                     "Qwen3-ASR 4bit 量化需要 bitsandbytes。请执行：pip install bitsandbytes"
                 ) from error
+        # MPS 上 Qwen3 用 bfloat16 可能不稳，统一 cpu 用 float32、其余（cuda/mps）bf16。
         dtype = torch.float32 if device == "cpu" else torch.bfloat16
-        device_map = "cpu" if device == "cpu" else f"{device}:0"
+        device_map = device if device == "cpu" else f"{device}:0"
         precision = "4bit" if quantization == "4bit" else str(dtype).replace("torch.", "")
         print(f"[qwen3_asr] 从 ModelScope 下载并加载 {model_id} (device={device}, {precision})...")
         model_path = download_modelscope(model_id, "Qwen3-ASR")

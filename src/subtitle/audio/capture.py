@@ -62,6 +62,23 @@ def _find_loopback(speaker_name_hint: Optional[str] = None):
     return None
 
 
+def _loopback_not_found_message() -> str:
+    """构造"没找到 loopback 设备"的提示，按平台给出针对性的引导。
+
+    Windows：通常是没装音频输出设备/驱动异常。
+    macOS：soundcard 原生不支持 loopback，需安装 BlackHole 等虚拟声卡后才会出现 loopback endpoint。
+    """
+    import platform
+    if platform.system() == "Darwin":
+        return (
+            "没找到系统声音 loopback 设备。macOS 原生不支持回录系统输出，"
+            "请安装免费虚拟声卡 BlackHole（https://existential.audio/blackhole/），"
+            "并在「音频 MIDI 设置」里把 BlackHole 与扬声器建成多输出设备，"
+            "重启本程序后即可在系统声音列表里看到它。麦克风输入不受影响。"
+        )
+    return "没找到 loopback 设备，确认系统已连接并启用音频输出设备"
+
+
 def list_microphone_devices() -> list[CaptureDeviceInfo]:
     """列出可用麦克风输入设备（非 loopback）。延迟 import soundcard。"""
     import soundcard as sc
@@ -148,7 +165,7 @@ class SystemAudioCapture(threading.Thread):
     def _run_loop(self):
         mic = _find_loopback(self.speaker_name)
         if mic is None:
-            raise RuntimeError("没找到 loopback 设备，确认系统有输出设备")
+            raise RuntimeError(_loopback_not_found_message())
         self._mic = mic
         print(f"[capture] loopback 源: {mic.name}")
 
