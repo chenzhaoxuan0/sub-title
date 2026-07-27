@@ -9,9 +9,20 @@ from .base import AsrEngine, OnResult
 
 def create_engine(cfg, on_result: OnResult, source: str = "system") -> AsrEngine:
     """根据 source 取对应的 AsrConfig（电脑声音/麦克风可独立配置引擎与参数），
-    再按 engine_type 创建引擎实例。source 同时透传给引擎，用于回调时标记来源。"""
+    再按 engine_type 创建引擎实例。source 同时透传给引擎，用于回调时标记来源。
+
+    说话人区分约束：enable_speaker_diarization=True 强制 engine_type="funasr"，
+    其他引擎（sensevoice / aliyun / faster_whisper）架构上不支持流式 spk_id。
+    不会改写 config，只在本次创建时降级，避免静默配置漂移。
+    """
     asr_cfg = cfg.asr.for_source(source)
     engine_type = getattr(asr_cfg, "engine_type", "funasr")
+    if getattr(asr_cfg, "enable_speaker_diarization", False) and engine_type != "funasr":
+        print(
+            f"[factory:{source}] ⚠️ 说话人区分开启但引擎类型={engine_type} 不支持流式 spk_id，"
+            f"本 session 降级为 funasr（请在设置里切引擎或关闭说话人区分）"
+        )
+        engine_type = "funasr"
 
     if engine_type == "funasr":
         from .funasr_engine import FunAsrEngine

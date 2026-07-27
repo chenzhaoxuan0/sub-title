@@ -122,6 +122,27 @@ class EngineConfigCard(SettingCard):
         self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
         cl.addWidget(self.engine_combo)
 
+        # 说话人区分开关（per source 独立：电脑声音 / 麦克风各自一个实例）
+        # 强制约束：开启时该 source 的引擎必须为 funasr（其他架构不支持流式 spk_id）。
+        # factory.py 会在加载时打印警告并降级。
+        self.diarization_check = ToggleSwitch()
+        cl.addWidget(_row(
+            "说话人区分",
+            "开启后字幕前会显示「[说话人 N]」并支持在「说话人」标签页命名。"
+            "当前 source 引擎会被强制为 FunASR（不支持流式 spk_id 的引擎会降级）。",
+            self.diarization_check,
+            vertical=True,
+        ))
+        # 不兼容引擎警告（占满卡片宽度，不和 stack 抢布局）
+        self.diarization_warn = QLabel("")
+        self.diarization_warn.setStyleSheet("color: #d94c4c; padding: 2px 0;")
+        self.diarization_warn.setWordWrap(True)
+        self.diarization_warn.hide()
+        cl.addWidget(self.diarization_warn)
+        # 联动：切换开关或引擎 → 刷新警告
+        self.diarization_check.checkedChanged.connect(self._update_diarization_warn)
+        self.engine_combo.currentIndexChanged.connect(self._update_diarization_warn)
+
         # 各引擎参数（QStackedWidget）
         self.stack = QStackedWidget()
         self._build_funasr_panel()
@@ -238,16 +259,36 @@ class EngineConfigCard(SettingCard):
     # ---- 联动 ----
     def _on_engine_changed(self, _idx: int):
         self._sync_stack()
+        self._update_diarization_warn()
 
     def _sync_stack(self):
         etype = self.engine_combo.currentData()
         self.stack.setCurrentIndex(self._STACK_INDEX.get(etype, 0))
+
+    def _update_diarization_warn(self):
+        """说话人区分开关在不兼容引擎上 → 红字提示。
+        
+        实际加载时 factory.py 会强制降级为 funasr 并打 warning；这里只是 UI 提示。
+        """
+        if not self.diarization_check.isChecked():
+            self.diarization_warn.hide()
+            return
+        etype = self.engine_combo.currentData()
+        if etype == "funasr":
+            self.diarization_warn.hide()
+        else:
+            self.diarization_warn.setText(
+                f"⚠️ 当前引擎「{etype}」不支持流式 spk_id，加载时会自动降级为 FunASR。"
+            )
+            self.diarization_warn.show()
 
     # ---- 读写 AsrConfig ----
     def load_from(self, asr: AsrConfig) -> None:
         idx = self.engine_combo.findData(asr.engine_type)
         self.engine_combo.setCurrentIndex(max(0, idx))
         self._sync_stack()
+        self.diarization_check.setChecked(bool(getattr(asr, "enable_speaker_diarization", False)))
+        self._update_diarization_warn()
         self.funasr_device_combo.setCurrentIndex(
             max(0, self.funasr_device_combo.findData(asr.device)))
         self.funasr_punc_check.setChecked(asr.funasr_punc_enabled)
@@ -269,6 +310,7 @@ class EngineConfigCard(SettingCard):
         asr.engine_type = self.engine_combo.currentData()
         asr.device = self.funasr_device_combo.currentData()
         asr.funasr_punc_enabled = self.funasr_punc_check.isChecked()
+        asr.enable_speaker_diarization = self.diarization_check.isChecked()
         asr.sensevoice_device = self.sv_device_combo.currentData()
         asr.sensevoice_segment_seconds = self.sv_segment_spin.value()
         asr.faster_whisper_model = self.fw_model_combo.currentData()
@@ -325,6 +367,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.tabs, 1)
 
         self.tabs.addTab(self._build_recognition_tab(), "识别")
+        self.tabs.addTab(self._build_speaker_tab(), "说话人")
         self.tabs.addTab(self._build_appearance_tab(), "外观")
         self.tabs.addTab(self._build_behavior_tab(), "行为")
         self.tabs.addTab(self._build_skin_tab(), "皮肤")
@@ -463,7 +506,13 @@ class SettingsDialog(QDialog):
         v.addStretch(1)
         return self._wrap_scroll(tab)
 
-    # ---------- 标签页2：外观 ----------
+    # ---------- 标签页2：说话人管理 ----------
+    def _build_speaker_tab(self) -> QWidget:
+        """说话人显示名管理面板 —— 嵌入 SpeakerNamesEditor，复用 panel 的 SpeakerNameMap 实例。"""
+        from .speaker_names_editor import SpeakerNamesEditor
+        return SpeakerNamesEditor(self.panel, self)
+
+    # ---------- 标签页3：外观 ----------
     def _build_appearance_tab(self) -> QWidget:
         tab = QWidget()
         v = QVBoxLayout(tab)
@@ -856,7 +905,8 @@ class SettingsDialog(QDialog):
         QTimer.singleShot(1200, lambda: self.copy_btn.setText("📋 复制全部"))
 
     def _on_tab_changed(self, idx: int):
-        if idx == 4:  # 文稿
+        # 用 tabText 判断「文稿」tab：tab 顺序变了不破坏这里。
+        if self.tabs.tabText(idx) == "文稿":
             self._refresh_transcript()
 
     def _on_theme_preview(self):

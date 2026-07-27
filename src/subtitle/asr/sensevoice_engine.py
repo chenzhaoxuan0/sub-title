@@ -86,7 +86,8 @@ class SenseVoiceEngine(AsrEngine):
             if res and res[0].get("text"):
                 text = _strip_tags(res[0]["text"])
                 if text:
-                    self.on_result(text, is_final=True, source=self.source)
+                    # SenseVoice 架构不支持说话人区分，spk_id 永远传 None
+                    self.on_result(text, is_final=True, source=self.source, spk_id=None)
         except Exception as e:
             print(f"[sensevoice] 推理异常: {e}")
             # buf 已在开头清空，状态一致

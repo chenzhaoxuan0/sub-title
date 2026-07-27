@@ -41,7 +41,7 @@ class SubtitlePipeline:
         self,
         cfg: Config,
         engine: AsrEngine,
-        on_text: Optional[Callable[[str, bool, str], None]] = None,
+        on_text: Optional[Callable[[str, bool, str, Optional[int]], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
         on_audio_level: Optional[Callable[[float, float, str], None]] = None,
         *,
@@ -51,7 +51,7 @@ class SubtitlePipeline:
     ):
         self.cfg = cfg
         self.engine = engine
-        self.on_text = on_text or (lambda t, f, s: print(t, end="", flush=True))
+        self.on_text = on_text or (lambda t, f, s, spk: print(t, end="", flush=True))
         self.on_error = on_error or (lambda m: print(f"[pipeline:{source}] {m}"))
         self.on_audio_level = on_audio_level or (lambda rms, peak, s: None)
 

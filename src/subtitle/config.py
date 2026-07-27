@@ -68,6 +68,13 @@ class AsrConfig:
     funasr_punc_model: str = "iic/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727"
     funasr_punc_device: str = "cpu"   # CT-Transformer 轻量，CPU 即可，避免和 ASR 抢 GPU
 
+    # ---- 说话人区分（spk_id 输出）----
+    # 开启后该 source（system / mic）的引擎必须为 funasr（其他引擎不支持流式 spk_id）。
+    # 开启时：model 加载时自动注入 spk_model="cam++"，engine 回调追加 spk_id 字段。
+    # 显示名由 ui.speaker_names_editor 管理；spk_id 仅在当前会话内稳定，重启后重置。
+    # 两路（system + mic）可独立开关；双开时 2x funasr 实例、2x GPU/内存。
+    enable_speaker_diarization: bool = False
+
     # ---- SenseVoice（段式，CPU 可跑）----
     sensevoice_model: str = "iic/SenseVoiceSmall"
     sensevoice_device: str = "cpu"          # cpu / cuda（Mac 用 cpu）
