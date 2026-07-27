@@ -140,8 +140,12 @@ class _PipelineWorker(QObject):
 
     def _make_pipeline(self, source: str, device_name) -> SubtitlePipeline:
         """创建一个单源 pipeline。source 决定 capture_kind + engine 的来源标签。"""
-        def on_result(text: str, is_final: bool, src: str = source, spk_id=None):
-            self.text.emit(text, is_final, src, spk_id)
+        # 形参名必须叫 source（不是 src）：base.py 的 OnResult 契约是
+        # (text, is_final, source, spk_id)，多个引擎（aliyun/faster_whisper/
+        # sensevoice）用关键字 source=self.source 调用，名字对不上会报
+        # 'unexpected keyword argument source'（合并说话人区分功能后引入）。
+        def on_result(text: str, is_final: bool, source: str = source, spk_id=None):
+            self.text.emit(text, is_final, source, spk_id)
         engine = create_engine(self.cfg, on_result=on_result, source=source)
         return SubtitlePipeline(
             self.cfg, engine,
