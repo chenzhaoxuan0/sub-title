@@ -62,3 +62,43 @@ def recommend_engine(info: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         return "funasr", {"device": "cuda"}
     # sensevoice CPU 是跨平台兜底：Mac 友好、自带标点、官方 CPU 实时方案
     return "sensevoice", {"sensevoice_device": "cpu"}
+
+
+def describe_recommendation(info: dict[str, Any]) -> str:
+    """Return an actionable local-model recommendation for the settings UI.
+
+    The automatic first-run choice remains latency-first. This text also names
+    higher-accuracy options that the detected hardware can reasonably load.
+    """
+    cores = int(info.get("cpu_cores", 0) or 0)
+    ram = float(info.get("ram_gb", 0) or 0)
+    vram = float(info.get("cuda_vram_gb", 0) or 0)
+    if not info.get("has_cuda"):
+        if cores < 4 or (ram and ram < 6):
+            return (
+                f"检测到 {cores} 线程 / {ram:g}GB 内存且没有 CUDA。建议使用阿里云 API；"
+                "本地最低可尝试 SenseVoice CPU，但实时性可能不足。"
+            )
+        return (
+            f"检测到 {cores} 线程 / {ram:g}GB 内存且没有 CUDA。推荐 SenseVoice CPU；"
+            "需要更低内存时可选 faster-whisper small + INT8。"
+        )
+    if vram >= 12:
+        return (
+            f"检测到 CUDA GPU（{vram:g}GB 显存）。实时默认推荐 FunASR Paraformer；"
+            "高精度可选 Qwen3-ASR 1.7B，显存紧张时选择 Qwen3 4bit。"
+        )
+    if vram >= 8:
+        return (
+            f"检测到 CUDA GPU（{vram:g}GB 显存）。实时默认推荐 FunASR Paraformer；"
+            "中文歌曲/多语种可选 Qwen3-ASR 0.6B 或 Fun-ASR-Nano。"
+        )
+    if vram >= 4:
+        return (
+            f"检测到 CUDA GPU（{vram:g}GB 显存）。推荐 FunASR Paraformer 流式；"
+            "显存不足以稳定运行 Qwen3/Nano 时请改用 SenseVoice 或 API。"
+        )
+    return (
+        f"检测到 CUDA GPU（{vram:g}GB 显存），但显存偏小。推荐 SenseVoice CPU；"
+        "需要更轻量的本地方案可选 faster-whisper small + INT8。"
+    )

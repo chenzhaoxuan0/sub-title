@@ -6,7 +6,7 @@
 """
 import unittest
 
-from subtitle.hardware import recommend_engine
+from subtitle.hardware import describe_recommendation, recommend_engine
 
 
 class RecommendEngineTests(unittest.TestCase):
@@ -65,6 +65,15 @@ class RecommendEngineTests(unittest.TestCase):
         info = {"cpu_cores": 8, "ram_gb": 16.0}
         engine, _ = recommend_engine(info)
         self.assertEqual(engine, "sensevoice")
+
+    def test_weak_cpu_recommendation_mentions_api(self):
+        message = describe_recommendation(self._info(cpu_cores=2, ram_gb=4.0))
+        self.assertIn("阿里云 API", message)
+
+    def test_large_gpu_recommendation_mentions_qwen_quantization(self):
+        message = describe_recommendation(self._info(has_cuda=True, cuda_vram_gb=12.0))
+        self.assertIn("Qwen3-ASR 1.7B", message)
+        self.assertIn("4bit", message)
 
 
 if __name__ == "__main__":

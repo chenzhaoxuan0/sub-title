@@ -21,7 +21,10 @@ _TAG_RE = re.compile(r"<\|[^|]*\|>")
 
 
 def _strip_tags(text: str) -> str:
-    return _TAG_RE.sub("", text).strip()
+    # SenseVoice occasionally emits a trailing newline (and can emit embedded
+    # line breaks).  The UI owns line wrapping, so model whitespace must not
+    # create an empty subtitle row.
+    return " ".join(_TAG_RE.sub("", text).split())
 
 
 class SenseVoiceEngine(AsrEngine):
@@ -32,6 +35,7 @@ class SenseVoiceEngine(AsrEngine):
         self._segment_samples = 0
         self._silence_threshold = 0.01
         self._silence_run = 0
+        self._speech_samples = 0
         self._closed = False
 
     def load(self) -> None:
@@ -46,6 +50,7 @@ class SenseVoiceEngine(AsrEngine):
             vad_model="fsmn-vad",
             vad_kwargs={"max_single_segment_time": 30000},
             device=device,
+            hub="ms",
         )
         self._segment_samples = int(seg_sec * 16000)
         print(f"[sensevoice] 就绪，段时长={seg_sec}s（CPU/段式，延迟略高于流式）")
@@ -61,6 +66,7 @@ class SenseVoiceEngine(AsrEngine):
             self._silence_run += len(chunk)
         else:
             self._silence_run = 0
+            self._speech_samples += len(chunk)
 
         should_infer = False
         if len(self._buf) >= self._segment_samples:
@@ -75,6 +81,10 @@ class SenseVoiceEngine(AsrEngine):
         audio = self._buf
         self._buf = np.zeros(0, dtype=np.float32)
         self._silence_run = 0
+        speech_samples = self._speech_samples
+        self._speech_samples = 0
+        if speech_samples == 0:
+            return
         try:
             res = self.model.generate(
                 input=audio,
@@ -105,4 +115,5 @@ class SenseVoiceEngine(AsrEngine):
     def reset(self) -> None:
         self._buf = np.zeros(0, dtype=np.float32)
         self._silence_run = 0
+        self._speech_samples = 0
         self._closed = False

@@ -32,6 +32,14 @@ def create_engine(cfg, on_result: OnResult, source: str = "system") -> AsrEngine
         from .sensevoice_engine import SenseVoiceEngine
         return SenseVoiceEngine(asr_cfg, on_result, source=source)
 
+    if engine_type == "funasr_nano":
+        from .funasr_nano_engine import FunAsrNanoEngine
+        return FunAsrNanoEngine(asr_cfg, on_result, source=source)
+
+    if engine_type == "qwen3_asr":
+        from .qwen3_asr_engine import Qwen3AsrEngine
+        return Qwen3AsrEngine(asr_cfg, on_result, source=source)
+
     if engine_type == "aliyun":
         from .aliyun_engine import AliyunEngine
         return AliyunEngine(asr_cfg, on_result, source=source)
@@ -46,5 +54,6 @@ def create_engine(cfg, on_result: OnResult, source: str = "system") -> AsrEngine
         return FasterWhisperEngine(asr_cfg, on_result, source=source)
 
     raise ValueError(
-        f"未知引擎类型: {engine_type}（支持: sensevoice/funasr/faster_whisper/aliyun）"
+        "未知引擎类型: " + engine_type
+        + "（支持: sensevoice/funasr/funasr_nano/qwen3_asr/faster_whisper/aliyun）"
     )

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .config import load_config, DEFAULT_CONFIG_PATH, default_config_path
 from .asr import create_engine
@@ -269,6 +269,8 @@ class SubtitleApp:
         # 防重入：快速连点开始时忽略后续
         if self._starting:
             return
+        if not self._check_optional_asr_dependencies(sys_enabled, mic_enabled):
+            return
         self._starting = True
         try:
             self._stop()
@@ -296,6 +298,32 @@ class SubtitleApp:
             self._thread.start()
         finally:
             self._starting = False
+
+    def _check_optional_asr_dependencies(self, sys_enabled, mic_enabled) -> bool:
+        """Show an actionable prompt before a missing optional engine reaches a worker thread."""
+        sources = []
+        if self.cfg.audio.system_audio_enabled if sys_enabled is None else sys_enabled:
+            sources.append(self.cfg.asr.system)
+        if self.cfg.audio.mic_enabled if mic_enabled is None else mic_enabled:
+            sources.append(self.cfg.asr.mic)
+        if not any(profile.engine_type == "qwen3_asr" for profile in sources):
+            return True
+        from .asr.qwen3_asr_engine import qwen3_asr_available
+        if qwen3_asr_available():
+            return True
+        script = Path(__file__).resolve().parents[2] / "scripts" / "install_qwen3_asr.bat"
+        message = QMessageBox(self.panel)
+        message.setIcon(QMessageBox.Information)
+        message.setWindowTitle("需要安装 Qwen3-ASR")
+        message.setText("Qwen3-ASR 是可选模型，当前环境尚未安装。")
+        message.setInformativeText(
+            "请先关闭本程序，运行以下脚本，完成后重新打开程序：\n"
+            f"{script}\n\n"
+            "也可在 subtitle Conda 环境中执行：pip install qwen-asr"
+        )
+        message.exec()
+        self.panel.set_status("Qwen3-ASR 未安装，请运行安装脚本")
+        return False
 
     def _on_started(self):
         self.panel.set_status("运行中 · 实时识别")

@@ -48,8 +48,9 @@ class AudioConfig:
 
 @dataclass
 class AsrConfig:
-    # 引擎选择：sensevoice（默认，CPU 友好+自带标点）/ funasr（本地流式，需 GPU 低延迟）/
-    #           faster_whisper（本地 Whisper，多语言+翻译，不依赖 torch）/ aliyun（阿里云API）
+    # 引擎选择：sensevoice（默认，CPU 友好+自带标点）/ funasr（Paraformer 流式）/
+    #           funasr_nano（新一代中文/歌词）/ qwen3_asr（新一代多语种）/
+    #           faster_whisper（兼容模式，静音时可能幻觉）/ aliyun（阿里云 API）
     # 默认 sensevoice：官方单流 CPU 即可实时，Mac/Win 通用；首次启动会按硬件重写此值。
     engine_type: str = "sensevoice"
 
@@ -67,6 +68,20 @@ class AsrConfig:
     funasr_punc_enabled: bool = False
     funasr_punc_model: str = "iic/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727"
     funasr_punc_device: str = "cpu"   # CT-Transformer 轻量，CPU 即可，避免和 ASR 抢 GPU
+
+    # ---- Fun-ASR-Nano（2025，中文/方言/歌词，段式）----
+    funasr_nano_model: str = "FunAudioLLM/Fun-ASR-Nano-2512"
+    funasr_nano_device: str = "cuda"
+    funasr_nano_language: str = "中文"
+    funasr_nano_segment_seconds: float = 2.0
+
+    # ---- Qwen3-ASR（2026，多语种/歌曲，段式；原生流式需 vLLM）----
+    qwen3_asr_model: str = "Qwen/Qwen3-ASR-0.6B"
+    qwen3_asr_device: str = "cuda"
+    # "none" = 原始权重；"4bit" = CUDA 上使用 bitsandbytes 运行时量化。
+    qwen3_asr_quantization: str = "none"
+    qwen3_asr_language: str = "Chinese"
+    qwen3_asr_segment_seconds: float = 2.0
 
     # ---- 说话人区分（spk_id 输出）----
     # 开启后该 source（system / mic）的引擎必须为 funasr（其他引擎不支持流式 spk_id）。
@@ -88,15 +103,16 @@ class AsrConfig:
 
     # ---- faster-whisper（CTranslate2 后端，段式伪流式，不依赖 torch）----
     # 价值：多语言（99 语言）+ 翻译 + 轻量分发。中文准确度弱于 FunASR 系列。
-    # 模型首用自动从 HF Hub 下载（large-v3-turbo ~1.5GB）。
-    faster_whisper_model: str = "large-v3-turbo"
+    # 模型首用从 ModelScope 下载（large-v3 约 3GB）。
+    faster_whisper_model: str = "large-v3"
     faster_whisper_device: str = "auto"             # cpu / cuda / auto（auto 自动回退，不崩）
     faster_whisper_compute_type: str = "auto"       # auto=GPU 用 float16 / CPU 用 int8
     faster_whisper_language: str = "zh"             # "auto" 或 None = 自动检测
-    faster_whisper_beam_size: int = 1               # 1 降延迟（turbo 在 beam=1 鲁棒）
+    faster_whisper_beam_size: int = 1               # 1 降延迟
     faster_whisper_segment_seconds: float = 2.0     # 复用 SenseVoice 的段式策略
     faster_whisper_silence_threshold: float = 0.01
-    faster_whisper_vad_filter: bool = False         # 内部 Silero VAD 清理，短段默认关
+    faster_whisper_min_speech_seconds: float = 0.1  # 静音段不送入模型，避免幻觉字幕
+    faster_whisper_vad_filter: bool = True          # 先过滤无语音片段，抑制静音幻觉
 
 
 @dataclass

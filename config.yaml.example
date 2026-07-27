@@ -14,8 +14,8 @@ audio:
   input_device: null            # null = 系统默认输出设备
 
 asr:
-  engine_type: funasr           # funasr / sensevoice / aliyun
-  # ---- FunASR（本地流式，GPU 推荐）----
+  engine_type: funasr           # funasr / sensevoice / funasr_nano / qwen3_asr / faster_whisper / aliyun
+  # ---- FunASR Paraformer（本地流式，GPU 推荐）----
   model: paraformer-zh-streaming
   device: cuda                  # cuda / cpu
   chunk_size: [0, 10, 5]
@@ -27,6 +27,21 @@ asr:
   sensevoice_model: iic/SenseVoiceSmall
   sensevoice_device: cpu        # Mac 用 cpu
   sensevoice_segment_seconds: 2.0
+  # ---- Fun-ASR-Nano（中文/方言/歌词，GPU 推荐）----
+  funasr_nano_model: FunAudioLLM/Fun-ASR-Nano-2512
+  funasr_nano_device: cuda
+  funasr_nano_language: 中文
+  funasr_nano_segment_seconds: 2.0
+  # ---- Qwen3-ASR（多语种/歌曲，需额外 pip install qwen-asr；从 ModelScope 下载）----
+  qwen3_asr_model: Qwen/Qwen3-ASR-0.6B
+  qwen3_asr_device: cuda
+  qwen3_asr_quantization: none # none / 4bit（CUDA + bitsandbytes，非 GGUF）
+  qwen3_asr_language: Chinese
+  qwen3_asr_segment_seconds: 2.0
+  # ---- faster-whisper（兼容模式：静音/音乐暂停时可能产生幻觉字幕）----
+  # 模型从 ModelScope 下载；旧的 large-v3-turbo 配置会自动改用 large-v3。
+  faster_whisper_model: large-v3
+  faster_whisper_vad_filter: true
   # ---- 阿里云 NLS（云端，任意平台）----
   aliyun_region: cn-shanghai    # region 不是密钥，可以放这里
   # aliyun_access_key_id / aliyun_access_key_secret / aliyun_appkey

@@ -292,6 +292,9 @@ class SubtitlePanel(QWidget):
         # 自动分行器：识别到句末标点或引擎边界时换行。只作用于字幕显示，
         # 不影响 skin 触发器（skin 走原始文本路径）。
         self._line_breaker = LineBreaker(enabled=self.ui_cfg.line_break_enabled)
+        # 段尾换行要等下一条非空字幕到来时才实际插入，否则 QTextDocument 会保留
+        # 一个空白末段，滚动到底后最后一条字幕会被顶到倒数第二行。
+        self._deferred_line_break = False
 
         self._init_window_flags()
         self._init_ui()
@@ -999,7 +1002,7 @@ class SubtitlePanel(QWidget):
         # 自动分行：对每条文本过 line_breaker（按句末标点或引擎边界插 \n）。
         # line_breaker 返回的字符串里 \n 是唯一的换行标记；按 \n split 成若干段，
         # 每段一个彩色 span，段间用纯文本 \n 换行（避免 insertHtml 吞 <br>）。
-        # 末尾若以 \n 结尾，split 会产生一个空串尾巴——需要保留对应的换行。
+        # 段尾换行延迟到下一条字幕前插入，避免文档末尾留下空白行。
         bar = self.view.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - bar.singleStep()
         saved_pos = bar.value()
@@ -1010,26 +1013,34 @@ class SubtitlePanel(QWidget):
             if not text:
                 continue
             processed = self._line_breaker.feed(text, is_final)
-            # 注意：split("\n") 在末尾有 \n 时会多一个空串元素，保留它能确保
-            # 下面的"每两个段之间插换行"逻辑自动在末尾也补上换行。
+            if not processed:
+                continue
+            if self._deferred_line_break:
+                cursor.insertText("\n")
+                self._deferred_line_break = False
+            ends_with_break = processed.endswith("\n")
+            if ends_with_break:
+                processed = processed[:-1]
             segments = processed.split("\n")
-            color, icon = self._source_style(source)
+            color = self._source_style(source)
             prefix = self._speaker_prefix(source, spk_id)
-            # icon/prefix 只在「这条 merged 项的第一个非空段」插一次。
-            # 之前每段都插 → 自动分行把一句话切成多行时，每行行首都堆一个 🔊，
-            # 刷屏且难读。同一句的后续分行段共享同一来源图标，不再重复。
-            icon_emitted = False
+            # 来源图标（🔊/🎤）已移除：QTextCursor.insertHtml 对 emoji（surrogate
+            # pair 码点 U+1F50A）的富文本解析有缺陷，funasr 流式高频回调时反复
+            # insert 富文本会把 emoji 之后的内容吞掉/错位，导致字幕文字被截断。
+            # 来源改用颜色区分（mic 用 mic_color，system 用主题文本色），不再加图标。
+            # 说话人 [显示名] 前缀是纯文本，保留并在句首显示一次。
+            prefix_emitted = False
             for i, seg in enumerate(segments):
                 if i > 0:
                     cursor.insertText("\n")
                 if seg:
-                    this_icon = icon if not icon_emitted else ""
-                    this_prefix = prefix if not icon_emitted else ""
-                    icon_emitted = True
+                    this_prefix = prefix if not prefix_emitted else ""
+                    prefix_emitted = True
                     safe = html.escape(seg)
                     cursor.insertHtml(
-                        f'<span style="color:{color};">{this_prefix}{this_icon}{safe}</span>'
+                        f'<span style="color:{color};">{this_prefix}{safe}</span>'
                     )
+            self._deferred_line_break = ends_with_break
             self._trim_if_needed()
         cursor.endEditBlock()
         # 锁定模式：强制跟到底
@@ -1046,15 +1057,13 @@ class SubtitlePanel(QWidget):
         self.status_label.setText(text)
 
     # ---------- 字幕插入文档（实际渲染，主线程）----------
-    def _source_style(self, source: str) -> tuple[str, str]:
-        """返回 (颜色, 图标) 用于按来源上色。电脑声音跟随主题文本色，麦克风用 mic_color。"""
+    def _source_style(self, source: str) -> str:
+        """返回来源颜色。电脑声音跟随主题文本色，麦克风用 mic_color。"""
         if source == "mic":
-            color = getattr(self.ui_cfg, "mic_color", None) or "#5aa9ff"
-            return color, "🎤 "
-        # system / 未知来源：用主题文本色，🔊 前缀
+            return getattr(self.ui_cfg, "mic_color", None) or "#5aa9ff"
+        # system / 未知来源：用主题文本色
         theme = self._theme_mgr.current if self._theme_mgr else None
-        color = (theme.colors.subtitle_text if theme else "#f2f2f2")
-        return color, "🔊 "
+        return theme.colors.subtitle_text if theme else "#f2f2f2"
 
     def _speaker_prefix(self, source: str, spk_id) -> str:
         """根据 spk_id 渲染 [显示名] 前缀（HTML 片段）。
@@ -1078,9 +1087,9 @@ class SubtitlePanel(QWidget):
         bar = self.view.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - bar.singleStep()
         saved_pos = bar.value()
-        color, icon = self._source_style(source)
+        color = self._source_style(source)
         safe = html.escape(text)
-        snippet = f'<span style="color:{color};">{icon}{safe}</span>'
+        snippet = f'<span style="color:{color};">{safe}</span>'
         cursor = QTextCursor(self.view.document())
         cursor.movePosition(QTextCursor.End)
         cursor.beginEditBlock()
@@ -1372,6 +1381,7 @@ class SubtitlePanel(QWidget):
 
     def clear_transcript(self):
         self.view.clear()
+        self._deferred_line_break = False
 
     def set_toolbar_hide_delay(self, ms: int):
         self.ui_cfg.toolbar_hide_delay_ms = int(ms)

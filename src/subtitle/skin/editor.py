@@ -506,11 +506,13 @@ class PropertyPanel(QWidget):
         self.plane.addItem("字幕下方", LayerPlane.BELOW_TEXT)
         self.plane.addItem("字幕上方", LayerPlane.ABOVE_TEXT)
         self.pin_x = QComboBox()
-        for value in HorizontalPin:
-            self.pin_x.addItem(value.value, value)
+        for label, value in (("左侧", HorizontalPin.LEFT), ("居中", HorizontalPin.CENTER),
+                             ("右侧", HorizontalPin.RIGHT)):
+            self.pin_x.addItem(label, value)
         self.pin_y = QComboBox()
-        for value in VerticalPin:
-            self.pin_y.addItem(value.value, value)
+        for label, value in (("顶部", VerticalPin.TOP), ("居中", VerticalPin.CENTER),
+                             ("底部", VerticalPin.BOTTOM)):
+            self.pin_y.addItem(label, value)
         self.sequence_fps = QDoubleSpinBox()
         self.sequence_fps.setRange(0.1, 120)
         self.sequence_fps.setSuffix(" fps")
@@ -519,8 +521,8 @@ class PropertyPanel(QWidget):
         form.addRow(self.visible)
         form.addRow(self.locked)
         form.addRow("层级", self.plane)
-        form.addRow("水平锚定", self.pin_x)
-        form.addRow("垂直锚定", self.pin_y)
+        form.addRow("水平固定点", self.pin_x)
+        form.addRow("垂直固定点", self.pin_y)
         form.addRow("序列帧率", self.sequence_fps)
         form.addRow(self.sequence_loop)
         layout.addWidget(general)

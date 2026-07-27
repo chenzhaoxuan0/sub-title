@@ -1,9 +1,14 @@
 # ASR（本地引擎：FunASR / SenseVoice 都基于 funasr）
 funasr==1.3.29
+# Qwen3-ASR / faster-whisper 的模型快照统一从 ModelScope 下载。
+modelscope>=1.20.0
 
 # Whisper 引擎（可选：多语言 + 翻译，CTranslate2 后端，不依赖 torch）
 # 未装时引擎选项里 faster_whisper 会置灰提示，不影响其他引擎。
 faster-whisper>=1.2.0
+
+# Qwen3-ASR（可选：新一代多语种/歌曲模型，依赖较重，按需安装）：
+# pip install qwen-asr
 
 # 硬件检测（首次启动按 CPU/RAM/GPU 推荐引擎）。funasr 的传递依赖，显式声明。
 psutil

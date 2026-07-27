@@ -22,6 +22,15 @@ from __future__ import annotations
 import numpy as np
 
 from .base import AsrEngine, OnResult
+from .modelscope_hub import download_modelscope
+
+
+_MODELSCOPE_MODEL_IDS = {
+    "large-v3": "Systran/faster-whisper-large-v3",
+    "medium": "Systran/faster-whisper-medium",
+    "small": "Systran/faster-whisper-small",
+    "distil-large-v3": "Systran/faster-distil-whisper-large-v3",
+}
 
 
 class FasterWhisperEngine(AsrEngine):
@@ -32,6 +41,8 @@ class FasterWhisperEngine(AsrEngine):
         self._segment_samples = 0
         self._silence_threshold = 0.01
         self._silence_run = 0
+        self._speech_samples = 0
+        self._min_speech_samples = 1600
         self._closed = False
         # transcribe kwargs（load 里 finalize）
         self._language: str | None = None
@@ -42,7 +53,7 @@ class FasterWhisperEngine(AsrEngine):
 
     def load(self) -> None:
         from faster_whisper import WhisperModel
-        model_name = getattr(self.cfg, "faster_whisper_model", "large-v3-turbo")
+        model_name = getattr(self.cfg, "faster_whisper_model", "large-v3")
         device = getattr(self.cfg, "faster_whisper_device", "auto")
         compute_type = getattr(self.cfg, "faster_whisper_compute_type", "auto")
         seg_sec = getattr(self.cfg, "faster_whisper_segment_seconds", 2.0)
@@ -55,15 +66,30 @@ class FasterWhisperEngine(AsrEngine):
             self._vad_parameters = dict(min_silence_duration_ms=500, speech_pad_ms=200)
         self._silence_threshold = float(
             getattr(self.cfg, "faster_whisper_silence_threshold", 0.01))
+        min_speech_seconds = float(
+            getattr(self.cfg, "faster_whisper_min_speech_seconds", 0.1))
+        self._min_speech_samples = max(1, int(min_speech_seconds * 16000))
         # initial_prompt 引导模型输出标点（实测：不带 prompt 时 Whisper 中文常无标点，
         # 给一个带标点的短例可显著提升标点输出率，支持下游自动分行）。
         if self._language == "zh":
             self._initial_prompt = "你好，这是一个例子。第一句话；第二句话！"
 
-        print(f"[faster_whisper] 加载 {model_name} (device={device}, "
-              f"compute_type={compute_type})，首次会从 HF Hub 下载...")
+        if model_name == "large-v3-turbo":
+            # ModelScope has no CTranslate2 turbo repository. Preserve old
+            # configs without bypassing the ModelScope-only policy.
+            print("[faster_whisper] large-v3-turbo 在 ModelScope 不可用，已使用 large-v3。")
+            model_name = "large-v3"
+        model_id = _MODELSCOPE_MODEL_IDS.get(model_name)
+        if not model_id:
+            raise ValueError(
+                f"faster-whisper 模型 {model_name!r} 不支持 ModelScope 下载。"
+                f"可选：{', '.join(_MODELSCOPE_MODEL_IDS)}"
+            )
+        print(f"[faster_whisper] 从 ModelScope 下载并加载 {model_id} (device={device}, "
+              f"compute_type={compute_type})...")
+        model_path = download_modelscope(model_id, "faster-whisper")
         self.model = WhisperModel(
-            model_size_or_path=model_name,
+            model_size_or_path=model_path,
             device=device,
             compute_type=compute_type,
         )
@@ -81,6 +107,7 @@ class FasterWhisperEngine(AsrEngine):
             self._silence_run += len(chunk)
         else:
             self._silence_run = 0
+            self._speech_samples += len(chunk)
 
         should_infer = False
         if len(self._buf) >= self._segment_samples:
@@ -95,6 +122,12 @@ class FasterWhisperEngine(AsrEngine):
         audio = self._buf
         self._buf = np.zeros(0, dtype=np.float32)
         self._silence_run = 0
+        speech_samples = self._speech_samples
+        self._speech_samples = 0
+        # Whisper will confidently decode silence/noise into common training
+        # phrases. Do not invoke it unless this segment contains real speech.
+        if speech_samples < self._min_speech_samples:
+            return
         try:
             segments, _info = self.model.transcribe(
                 audio,                                # 1-D float32 16k mono —— 原生支持
@@ -128,4 +161,5 @@ class FasterWhisperEngine(AsrEngine):
     def reset(self) -> None:
         self._buf = np.zeros(0, dtype=np.float32)
         self._silence_run = 0
+        self._speech_samples = 0
         self._closed = False

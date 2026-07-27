@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import Config, AsrConfig
-from .. import credentials
+from .. import credentials, hardware
 from .theme_engine import (
     Theme, ThemeColors, ThemeGeometry, ThemeManager,
     get_theme_manager, BUILTIN_THEMES, PROTECTED_THEMES,
@@ -96,13 +96,17 @@ class EngineConfigCard(SettingCard):
 
     # 引擎下拉项：(显示名, engine_type)。顺序与 _stack 索引映射对应。
     _ENGINE_ITEMS = [
-        ("本地 FunASR（流式，需GPU）", "funasr"),
+        ("本地 FunASR Paraformer（流式，需GPU）", "funasr"),
         ("本地 SenseVoice（小模型，CPU可跑）", "sensevoice"),
-        ("本地 Whisper（faster-whisper，多语言+翻译）", "faster_whisper"),
+        ("本地 Fun-ASR-Nano（中文/歌词，需GPU）", "funasr_nano"),
+        ("本地 Qwen3-ASR（多语种/歌曲，需GPU）", "qwen3_asr"),
+        ("本地 Whisper（faster-whisper，兼容模式）", "faster_whisper"),
         ("阿里云 API（流式，任意平台）", "aliyun"),
     ]
-    # engine_type → stack 索引（funasr=0, sensevoice=1, faster_whisper=2, aliyun=3）
-    _STACK_INDEX = {"funasr": 0, "sensevoice": 1, "faster_whisper": 2, "aliyun": 3}
+    _STACK_INDEX = {
+        "funasr": 0, "sensevoice": 1, "funasr_nano": 2,
+        "qwen3_asr": 3, "faster_whisper": 4, "aliyun": 5,
+    }
 
     def __init__(self, title: str, content: str, parent=None):
         # vertical=True：引擎卡片标题/说明在上，引擎选择+参数面板在下占满宽度，
@@ -121,6 +125,16 @@ class EngineConfigCard(SettingCard):
         self.engine_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
         cl.addWidget(self.engine_combo)
+
+        self._hardware_info = hardware.detect()
+        self.hardware_hint = QLabel(hardware.describe_recommendation(self._hardware_info))
+        self.hardware_hint.setStyleSheet("color: #888; font-size: 11px;")
+        self.hardware_hint.setWordWrap(True)
+        cl.addWidget(self.hardware_hint)
+        self.apply_hardware_recommendation_btn = QPushButton("应用实时优先推荐")
+        self.apply_hardware_recommendation_btn.setToolTip("根据当前硬件选择适合实时字幕的本地引擎")
+        self.apply_hardware_recommendation_btn.clicked.connect(self._apply_hardware_recommendation)
+        cl.addWidget(self.apply_hardware_recommendation_btn)
 
         # 说话人区分开关（per source 独立：电脑声音 / 麦克风各自一个实例）
         # 强制约束：开启时该 source 的引擎必须为 funasr（其他架构不支持流式 spk_id）。
@@ -147,6 +161,8 @@ class EngineConfigCard(SettingCard):
         self.stack = QStackedWidget()
         self._build_funasr_panel()
         self._build_sensevoice_panel()
+        self._build_funasr_nano_panel()
+        self._build_qwen3_asr_panel()
         self._build_faster_whisper_panel()
         self._build_aliyun_panel()
         cl.addWidget(self.stack)
@@ -185,11 +201,77 @@ class EngineConfigCard(SettingCard):
         lp.addStretch(1)
         self.stack.addWidget(panel)
 
+    @staticmethod
+    def _local_device_combo() -> QComboBox:
+        combo = QComboBox()
+        combo.addItem("CUDA（NVIDIA GPU，推荐）", "cuda")
+        combo.addItem("CPU（可运行，但延迟较高）", "cpu")
+        return combo
+
+    @staticmethod
+    def _segment_spin() -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setRange(0.5, 8.0)
+        spin.setSingleStep(0.5)
+        spin.setSuffix(" 秒")
+        return spin
+
+    def _build_funasr_nano_panel(self):
+        panel = QWidget()
+        lp = QVBoxLayout(panel)
+        lp.setContentsMargins(0, 0, 0, 0)
+        lp.setSpacing(4)
+        self.nano_device_combo = self._local_device_combo()
+        lp.addWidget(_row("设备", "800M 模型；中文、方言、歌词和音乐背景识别", self.nano_device_combo, vertical=True))
+        self.nano_language_combo = QComboBox()
+        for label, value in (("中文", "中文"), ("英文", "English"), ("日文", "Japanese")):
+            self.nano_language_combo.addItem(label, value)
+        lp.addWidget(_row("语言", "指定语言可提升准确率", self.nano_language_combo, vertical=True))
+        self.nano_segment_spin = self._segment_spin()
+        lp.addWidget(_row("攒段时长", "段式实时，越小延迟越低但易切词", self.nano_segment_spin, vertical=True))
+        lp.addStretch(1)
+        self.stack.addWidget(panel)
+
+    def _build_qwen3_asr_panel(self):
+        panel = QWidget()
+        lp = QVBoxLayout(panel)
+        lp.setContentsMargins(0, 0, 0, 0)
+        lp.setSpacing(4)
+        self.qwen3_model_combo = QComboBox()
+        self.qwen3_model_combo.addItem("Qwen3-ASR-0.6B（推荐）", "Qwen/Qwen3-ASR-0.6B")
+        self.qwen3_model_combo.addItem("Qwen3-ASR-1.7B（更高精度）", "Qwen/Qwen3-ASR-1.7B")
+        lp.addWidget(_row("模型", "需安装 qwen-asr；模型首次从 ModelScope 下载", self.qwen3_model_combo, vertical=True))
+        self.qwen3_device_combo = self._local_device_combo()
+        lp.addWidget(_row("设备", "原生低延迟流式需 NVIDIA GPU + vLLM", self.qwen3_device_combo, vertical=True))
+        self.qwen3_quant_combo = QComboBox()
+        self.qwen3_quant_combo.addItem("原始精度（GPU BF16 / CPU FP32）", "none")
+        self.qwen3_quant_combo.addItem("4-bit 运行时量化（CUDA，需 bitsandbytes）", "4bit")
+        lp.addWidget(_row("量化", "减少 Qwen3 显存占用；不是 GGUF，CPU 不支持 4-bit", self.qwen3_quant_combo, vertical=True))
+        self.qwen3_language_combo = QComboBox()
+        for label, value in (("自动检测", None), ("中文", "Chinese"), ("英文", "English"), ("日文", "Japanese")):
+            self.qwen3_language_combo.addItem(label, value)
+        lp.addWidget(_row("语言", "自动检测支持多语种和方言", self.qwen3_language_combo, vertical=True))
+        self.qwen3_segment_spin = self._segment_spin()
+        lp.addWidget(_row("攒段时长", "当前内置段式模式；vLLM 原生流式将后续接入", self.qwen3_segment_spin, vertical=True))
+        hint = QLabel("安装：pip install qwen-asr。该包依赖较重，不随本程序默认安装。")
+        hint.setStyleSheet("color: #b87b28; font-size: 11px;")
+        hint.setWordWrap(True)
+        lp.addWidget(hint)
+        lp.addStretch(1)
+        self.stack.addWidget(panel)
+
     def _build_faster_whisper_panel(self):
         panel = QWidget()
         lp = QVBoxLayout(panel)
         lp.setContentsMargins(0, 0, 0, 0)
         lp.setSpacing(4)
+        warning = QLabel(
+            "⚠️ 兼容模式：Whisper 在静音、音乐暂停或片尾可能产生幻觉字幕。"
+            "已启用 VAD 过滤，但无法保证完全消除；中文音乐建议使用 Fun-ASR-Nano 或 Qwen3-ASR。"
+        )
+        warning.setStyleSheet("color: #c77; font-size: 11px;")
+        warning.setWordWrap(True)
+        lp.addWidget(warning)
         # 关键性能：用 find_spec 探测 faster_whisper 是否安装，**不要真正 import**。
         # import faster_whisper 会拖进 ctranslate2(~2.7s) + tokenizers，首次约 3s，
         # 而 SettingsDialog 有两张引擎卡片（电脑声音+麦克风）→ 卡 ~3s 才打开。
@@ -198,13 +280,12 @@ class EngineConfigCard(SettingCard):
         import importlib.util
         self._fw_available = importlib.util.find_spec("faster_whisper") is not None
         self.fw_model_combo = QComboBox()
-        for name, label in [("large-v3-turbo", "large-v3-turbo（推荐，快+准）"),
-                            ("large-v3", "large-v3（最准，慢）"),
+        for name, label in [("large-v3", "large-v3（推荐，最准）"),
                             ("medium", "medium（中等）"),
                             ("small", "small（最快，弱机器）"),
                             ("distil-large-v3", "distil-large-v3（仅英文，最快）")]:
             self.fw_model_combo.addItem(label, name)
-        lp.addWidget(_row("Whisper 模型", "首用从 HF Hub 自动下载", self.fw_model_combo, vertical=True))
+        lp.addWidget(_row("Whisper 模型", "首用从 ModelScope 自动下载", self.fw_model_combo, vertical=True))
         self.fw_device_combo = QComboBox()
         self.fw_device_combo.addItem("auto（自动检测，推荐）", "auto")
         self.fw_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
@@ -216,7 +297,7 @@ class EngineConfigCard(SettingCard):
                           ("int8", "int8（CPU 最快）"),
                           ("int8_float16", "int8_float16（省显存）")]:
             self.fw_compute_combo.addItem(label, cv)
-        lp.addWidget(_row("计算精度", "auto=GPU用float16/CPU用int8", self.fw_compute_combo, vertical=True))
+        lp.addWidget(_row("计算精度", "INT8 是 CPU/GPU 可用的量化运行模式；CPU 推荐 INT8", self.fw_compute_combo, vertical=True))
         self.fw_lang_combo = QComboBox()
         self.fw_lang_combo.addItem("中文", "zh")
         self.fw_lang_combo.addItem("自动检测", "auto")
@@ -225,12 +306,18 @@ class EngineConfigCard(SettingCard):
         lp.addWidget(_row("语言", "影响识别准确度，中文建议指定", self.fw_lang_combo, vertical=True))
         self.fw_beam_spin = QSpinBox()
         self.fw_beam_spin.setRange(1, 10)
-        lp.addWidget(_row("beam_size", "1 最快（turbo 鲁棒），5 默认更准", self.fw_beam_spin, vertical=True))
+        lp.addWidget(_row("beam_size", "1 最快，5 默认更准", self.fw_beam_spin, vertical=True))
         self.fw_seg_spin = QDoubleSpinBox()
         self.fw_seg_spin.setRange(0.5, 5.0)
         self.fw_seg_spin.setSingleStep(0.5)
         self.fw_seg_spin.setSuffix(" 秒")
         lp.addWidget(_row("攒段时长", "越小延迟越低但易切词", self.fw_seg_spin, vertical=True))
+        self.fw_vad_check = QCheckBox("过滤无语音片段（推荐，抑制静音幻觉）")
+        lp.addWidget(self.fw_vad_check)
+        gguf_hint = QLabel("GGUF 提示：当前程序未集成 llama.cpp/GGUF ASR 后端，不能加载任意 GGUF 文件。CPU 请使用此处的 small/medium + INT8。")
+        gguf_hint.setStyleSheet("color: #888; font-size: 11px;")
+        gguf_hint.setWordWrap(True)
+        lp.addWidget(gguf_hint)
         if not self._fw_available:
             hint_fw = QLabel("⚠️ faster-whisper 未安装。多语言/翻译引擎需要它：\n"
                              "pip install faster-whisper（不依赖 torch）")
@@ -238,7 +325,8 @@ class EngineConfigCard(SettingCard):
             hint_fw.setWordWrap(True)
             lp.addWidget(hint_fw)
             for w in (self.fw_model_combo, self.fw_device_combo, self.fw_compute_combo,
-                      self.fw_lang_combo, self.fw_beam_spin, self.fw_seg_spin):
+                      self.fw_lang_combo, self.fw_beam_spin, self.fw_seg_spin,
+                      self.fw_vad_check):
                 w.setEnabled(False)
         lp.addStretch(1)
         self.stack.addWidget(panel)
@@ -264,6 +352,16 @@ class EngineConfigCard(SettingCard):
     def _sync_stack(self):
         etype = self.engine_combo.currentData()
         self.stack.setCurrentIndex(self._STACK_INDEX.get(etype, 0))
+
+    def _apply_hardware_recommendation(self):
+        engine_type, overrides = hardware.recommend_engine(self._hardware_info)
+        self.engine_combo.setCurrentIndex(max(0, self.engine_combo.findData(engine_type)))
+        if "device" in overrides:
+            self.funasr_device_combo.setCurrentIndex(
+                max(0, self.funasr_device_combo.findData(overrides["device"])))
+        if "sensevoice_device" in overrides:
+            self.sv_device_combo.setCurrentIndex(
+                max(0, self.sv_device_combo.findData(overrides["sensevoice_device"])))
 
     def _update_diarization_warn(self):
         """说话人区分开关在不兼容引擎上 → 红字提示。
@@ -295,6 +393,20 @@ class EngineConfigCard(SettingCard):
         self.sv_device_combo.setCurrentIndex(
             max(0, self.sv_device_combo.findData(asr.sensevoice_device)))
         self.sv_segment_spin.setValue(asr.sensevoice_segment_seconds)
+        self.nano_device_combo.setCurrentIndex(
+            max(0, self.nano_device_combo.findData(asr.funasr_nano_device)))
+        self.nano_language_combo.setCurrentIndex(
+            max(0, self.nano_language_combo.findData(asr.funasr_nano_language)))
+        self.nano_segment_spin.setValue(asr.funasr_nano_segment_seconds)
+        self.qwen3_model_combo.setCurrentIndex(
+            max(0, self.qwen3_model_combo.findData(asr.qwen3_asr_model)))
+        self.qwen3_device_combo.setCurrentIndex(
+            max(0, self.qwen3_device_combo.findData(asr.qwen3_asr_device)))
+        self.qwen3_quant_combo.setCurrentIndex(
+            max(0, self.qwen3_quant_combo.findData(asr.qwen3_asr_quantization)))
+        self.qwen3_language_combo.setCurrentIndex(
+            max(0, self.qwen3_language_combo.findData(asr.qwen3_asr_language)))
+        self.qwen3_segment_spin.setValue(asr.qwen3_asr_segment_seconds)
         self.fw_model_combo.setCurrentIndex(
             max(0, self.fw_model_combo.findData(asr.faster_whisper_model)))
         self.fw_device_combo.setCurrentIndex(
@@ -305,6 +417,7 @@ class EngineConfigCard(SettingCard):
             max(0, self.fw_lang_combo.findData(asr.faster_whisper_language)))
         self.fw_beam_spin.setValue(asr.faster_whisper_beam_size)
         self.fw_seg_spin.setValue(asr.faster_whisper_segment_seconds)
+        self.fw_vad_check.setChecked(asr.faster_whisper_vad_filter)
 
     def apply_to(self, asr: AsrConfig) -> None:
         asr.engine_type = self.engine_combo.currentData()
@@ -313,12 +426,21 @@ class EngineConfigCard(SettingCard):
         asr.enable_speaker_diarization = self.diarization_check.isChecked()
         asr.sensevoice_device = self.sv_device_combo.currentData()
         asr.sensevoice_segment_seconds = self.sv_segment_spin.value()
+        asr.funasr_nano_device = self.nano_device_combo.currentData()
+        asr.funasr_nano_language = self.nano_language_combo.currentData()
+        asr.funasr_nano_segment_seconds = self.nano_segment_spin.value()
+        asr.qwen3_asr_model = self.qwen3_model_combo.currentData()
+        asr.qwen3_asr_device = self.qwen3_device_combo.currentData()
+        asr.qwen3_asr_quantization = self.qwen3_quant_combo.currentData()
+        asr.qwen3_asr_language = self.qwen3_language_combo.currentData()
+        asr.qwen3_asr_segment_seconds = self.qwen3_segment_spin.value()
         asr.faster_whisper_model = self.fw_model_combo.currentData()
         asr.faster_whisper_device = self.fw_device_combo.currentData()
         asr.faster_whisper_compute_type = self.fw_compute_combo.currentData()
         asr.faster_whisper_language = self.fw_lang_combo.currentData()
         asr.faster_whisper_beam_size = self.fw_beam_spin.value()
         asr.faster_whisper_segment_seconds = self.fw_seg_spin.value()
+        asr.faster_whisper_vad_filter = self.fw_vad_check.isChecked()
 
 
 class SettingsDialog(QDialog):

@@ -46,6 +46,7 @@ class FunAsrEngine(AsrEngine):
             model=self.cfg.model,
             device=self.cfg.device,
             disable_update=getattr(self.cfg, "disable_update", True),
+            hub="ms",  # Explicitly pin FunASR downloads to ModelScope.
         )
         if self._diarization_enabled:
             model_kwargs["spk_model"] = "cam++"
@@ -64,7 +65,7 @@ class FunAsrEngine(AsrEngine):
             punc_dev = getattr(self.cfg, "funasr_punc_device", "cpu")
             print(f"[funasr] 加载流式标点模型 {punc_id} (device={punc_dev})，首次会下载...")
             self._punc_model = AutoModel(
-                model=punc_id, device=punc_dev, disable_update=True,
+                model=punc_id, device=punc_dev, disable_update=True, hub="ms",
             )
             print("[funasr] 标点模型就绪")
         print("[funasr] 模型就绪")

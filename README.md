@@ -2,7 +2,7 @@
 
 监控电脑系统声音（浏览器、播放器、会议软件的输出），用本地 GPU 跑语音识别大模型，在屏幕上实时显示中文字幕。完全本地、零网络（API 模式除外）、个人自用优先。
 
-支持三种识别引擎可切换：**本地 FunASR 流式**（低延迟，需 GPU）、**本地 SenseVoice 小模型**（CPU 可跑，适合 Mac/弱设备）、**阿里云 NLS API**（任意平台，免本地算力）。
+支持本地与云端识别引擎可切换：**FunASR Paraformer 流式**（低延迟）、**SenseVoice**（CPU 可跑）、**Fun-ASR-Nano**（中文/歌词）、**Qwen3-ASR**（多语种/歌曲）与阿里云 NLS API。faster-whisper 作为兼容模式保留，但静音和音乐暂停时可能产生幻觉字幕。
 
 **🔐 凭证安全**：AccessKey / Secret / AppKey 存到操作系统级保险箱（Windows Credential Manager / macOS Keychain / Linux Secret Service），**绝不**写进 `config.yaml`，避免被 Git 提交 / 截图 / 同步盘泄露。详见 [凭证存储与安全](#凭证存储与安全)。
 
@@ -11,7 +11,44 @@
 ### 识别引擎（可切换）
 - **FunASR Paraformer 流式**（`paraformer-zh-streaming`）：原生流式，RTF 0.06–0.1，延迟 < 100ms，中文准确。需要 NVIDIA GPU。
 - **SenseVoice-Small**（`iic/SenseVoiceSmall`）：234M 小模型，CPU 即可流畅，适合 Mac / 无 GPU 设备。段式伪流式（VAD 切句 + 整段推理），延迟略高。
+- **Fun-ASR-Nano**（`FunAudioLLM/Fun-ASR-Nano-2512`）：800M 新一代模型，面向中文、方言、歌词和音乐背景。当前为段式实时模式，推荐 NVIDIA GPU。
+- **Qwen3-ASR**（[`0.6B`](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B) / [`1.7B`](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)）：2026 年发布的多语种/歌曲模型；当前为段式实时模式，原生流式需要 NVIDIA GPU 与 vLLM。使用前安装 `pip install qwen-asr`，权重只从 ModelScope 下载。
+- **faster-whisper**：保留给已有配置和多语种兼容用途。Whisper 在静音、音乐暂停和片尾可能输出幻觉字幕，VAD 只能缓解，中文音乐请优先使用 Fun-ASR-Nano 或 Qwen3-ASR。可用权重从 ModelScope 下载。
 - **阿里云 NLS API**：云端流式识别，任意平台可用，免本地算力。按量计费。
+
+### 本地模型下载地址
+
+本程序的本地模型统一使用 ModelScope；不会在 ModelScope 失败后自动改从 Hugging Face 下载。
+
+| 引擎 | ModelScope 地址 |
+| --- | --- |
+| FunASR Paraformer 流式 | [damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online](https://www.modelscope.cn/models/damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online) |
+| SenseVoice-Small | [iic/SenseVoiceSmall](https://www.modelscope.cn/models/iic/SenseVoiceSmall) |
+| Fun-ASR-Nano | [FunAudioLLM/Fun-ASR-Nano-2512](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512) |
+| Qwen3-ASR 0.6B | [Qwen/Qwen3-ASR-0.6B](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B) |
+| Qwen3-ASR 1.7B | [Qwen/Qwen3-ASR-1.7B](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B) |
+| faster-whisper large-v3 | [Systran/faster-whisper-large-v3](https://www.modelscope.cn/models/Systran/faster-whisper-large-v3) |
+| faster-whisper medium | [Systran/faster-whisper-medium](https://www.modelscope.cn/models/Systran/faster-whisper-medium) |
+| faster-whisper small | [Systran/faster-whisper-small](https://www.modelscope.cn/models/Systran/faster-whisper-small) |
+| faster-whisper distil-large-v3 | [Systran/faster-distil-whisper-large-v3](https://www.modelscope.cn/models/Systran/faster-distil-whisper-large-v3) |
+
+### 本地运行硬件参考
+
+下表是单路实时字幕的保守建议，实际占用会受音频长度、驱动、系统后台和是否同时开启麦克风影响。双输入源会创建两套模型实例，应按约两倍内存/显存预留。模型下载大小是近似值，仓库更新后可能变化。
+
+| 引擎 / 模型 | 下载大小约 | 推荐硬件 | CPU / 量化说明 |
+| --- | ---: | --- | --- |
+| FunASR Paraformer 流式 | 约 1GB | NVIDIA GPU 4GB+；或 8 线程、16GB RAM | 当前默认的低延迟本地方案；CPU 可用但应优先保证 CPU 性能。 |
+| SenseVoice-Small | 约 250MB | 4 核、8GB RAM；GPU 非必需 | 最通用的 CPU/Mac 方案，不提供 GGUF 入口。 |
+| Fun-ASR-Nano | 约 1.5-2GB | NVIDIA GPU 6GB+、16GB RAM | 未接入可选 GGUF/INT8 权重；CPU 可加载但通常不适合实时。 |
+| Qwen3-ASR 0.6B | 约 1.9GB | NVIDIA GPU 6GB+、16GB RAM | 可在设置中选 CUDA 4-bit 运行时量化，适合显存较紧张的 GPU；4-bit 需要 `bitsandbytes`，不支持 CPU。 |
+| Qwen3-ASR 1.7B | 约 4-5GB | NVIDIA GPU 12GB+、24GB RAM | 更高准确率；也可尝试 CUDA 4-bit，但实时表现取决于 GPU。 |
+| faster-whisper small | 约 0.5GB | 4 核、8GB RAM | 选择 `INT8` 即可用量化 CPU 推理，是低内存本地备选。 |
+| faster-whisper medium | 约 1.5GB | 6 核、12GB RAM，或 GPU 4GB+ | CPU 请选择 `INT8`；多语种兼容性较好。 |
+| faster-whisper large-v3 | 约 3GB | GPU 6GB+；CPU 16GB+ 仅建议离线/较高延迟 | `INT8` 可减少运行内存，但不能根治 Whisper 的静音幻觉。 |
+| 阿里云 NLS API | 无本地模型 | 任意可联网设备 | 弱 CPU、内存不足 6GB 或不希望维护本地模型时优先选择。 |
+
+**量化与 GGUF 的边界**：本程序只展示当前引擎实际能加载的格式。faster-whisper 通过 CTranslate2 的 `INT8` 运行时量化支持 CPU；Qwen3-ASR 通过 Transformers + `bitsandbytes` 支持 CUDA 4-bit。FunASR/SenseVoice/Nano 的当前运行库以及 Qwen3 的 Python 后端都不能直接加载任意 GGUF 文件，因此没有提供会失败的 GGUF 文件选择器。将来接入 llama.cpp 或其他 GGUF ASR 后端后，才会新增独立的 GGUF 引擎选项。
 
 ### 沉浸式字幕窗口
 - 无边框、半透明、窗口置顶，平时就是一个浮在屏幕上的字幕条
@@ -98,8 +135,19 @@ python -m subtitle
 ### SenseVoice（本地，CPU 可跑，适合 Mac/弱设备）
 1. 设置 → 识别引擎 → 选「本地 SenseVoice」
 2. 设备选 CPU（或 CUDA），攒段时长默认 2 秒
-3. 应用。首次会下载 SenseVoice 模型（约 254MB）
+3. 应用。首次会从 ModelScope 下载 SenseVoice 模型（约 254MB）
 4. 无需额外依赖（复用 funasr + torch 的 CPU 版即可）
+
+### Fun-ASR-Nano（本地，中文/歌词）
+1. 设置 → 识别引擎 → 选「本地 Fun-ASR-Nano」
+2. 推荐使用 NVIDIA GPU；模型首次使用会从 ModelScope 自动下载（[模型页](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512)）
+3. 此模型适合中文、方言、歌词与带音乐背景的内容；当前使用段式实时推理
+
+### Qwen3-ASR（本地，多语种/歌曲）
+1. 先安装可选依赖：`pip install qwen-asr`
+2. 设置 → 识别引擎 → 选「本地 Qwen3-ASR」
+3. 推荐 NVIDIA GPU。模型首次只从 ModelScope 下载：[0.6B](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B)、[1.7B](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)。原生流式后端依赖 vLLM；当前应用内置段式实时推理
+4. 显存紧张时可在设置中选择「4-bit 运行时量化」。它需要 CUDA 和 `bitsandbytes`；可运行 `scripts\\install_qwen3_asr_4bit.bat` 一并安装。CPU 不支持该量化模式。
 
 ### 阿里云 NLS API（云端，任意平台）
 1. 先装阿里云 NLS SDK（未发布到 PyPI，从 GitHub 装）：

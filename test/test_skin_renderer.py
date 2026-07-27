@@ -29,6 +29,24 @@ class SkinRendererTests(unittest.TestCase):
             self.assertEqual(renderer.layer_at(QPointF(15, 25), 200, 100).id, left.id)
             self.assertEqual(renderer.layer_at(QPointF(195, 25), 200, 100).id, right.id)
 
+    def test_right_top_pin_stays_at_corner_when_resized(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            image = QImage(10, 10, QImage.Format_ARGB32)
+            image.fill(QColor(255, 0, 0, 255))
+            image.save(str(Path(temporary) / "image.png"))
+            layer = Layer(
+                image_path="image.png", x=90, y=0,
+                pin_x=HorizontalPin.RIGHT,
+            )
+            renderer = SkinRenderer(
+                SkinDefinition(design_width=100, design_height=100, layers=[layer]),
+                Path(temporary),
+            )
+            for width, height in ((200, 100), (160, 80), (60, 30)):
+                bounds = renderer.get_layer_bounds(layer, canvas_w=width, canvas_h=height)
+                self.assertAlmostEqual(bounds.right(), width)
+                self.assertAlmostEqual(bounds.top(), 0)
+
     def test_sequence_frame_selection(self):
         layer = Layer(
             asset_type=AssetType.SEQUENCE,
