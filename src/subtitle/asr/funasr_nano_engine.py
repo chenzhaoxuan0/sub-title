@@ -11,14 +11,6 @@ import soundfile as sf
 from .base import AsrEngine, OnResult
 
 
-class NanoStreamingUnavailable(RuntimeError):
-    """Fun-ASR-Nano 流式服务不可用时抛出。
-
-    由 factory 在端口探测失败 / websockets 未安装时捕获，本次 session 回退段式。
-    放在此模块是因为 factory 已 import 本模块路径，且它与「段式作为流式回退」语义同源。
-    """
-
-
 class FunAsrNanoEngine(AsrEngine):
     """Use the current FunASR runtime without making vLLM a required dependency."""
 
