@@ -17,6 +17,7 @@ v4 新增：
 """
 from __future__ import annotations
 
+import html
 import platform
 from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QTimer, Signal, QEvent
 from PySide6.QtGui import QFont, QTextCursor, QMouseEvent, QPainter, QColor, QCursor, QRegion
@@ -27,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import UiConfig
-from ..audio import list_loopback_devices
+from ..audio import list_loopback_devices, list_microphone_devices
 from .line_breaker import LineBreaker
 from .theme_engine import Theme, ThemeManager, get_theme_manager
 
@@ -232,7 +233,7 @@ class SkinExtensionWindow(QWidget):
 class SubtitlePanel(QWidget):
     """沉浸式无边框字幕窗口 v4。"""
 
-    _text_appended = Signal(str, bool)
+    _text_appended = Signal(str, bool, str)   # (text, is_final, source)
     hide_requested = Signal()
     quit_requested = Signal()
     theme_changed = Signal(str)  # 主题切换信号
@@ -265,10 +266,10 @@ class SubtitlePanel(QWidget):
         self._hide_timer.setInterval(getattr(ui_cfg, "toolbar_hide_delay_ms", 800))
         self._hide_timer.timeout.connect(self._hide_overlays)
 
-        # P0 性能：字幕追加节流。emit_text 累积到 _pending_text，
-        # 16ms 定时器到点一次性 flush，把每秒 10+ 次插入降到 ~60fps 上限。
-        self._pending_text = ""
-        self._pending_has_final = False
+        # P0 性能：字幕追加节流。emit_text 累积到 _pending（按到达顺序的列表，
+        # 每条 (text, is_final, source)），16ms 定时器到点一次性 flush，
+        # 把每秒 10+ 次插入降到 ~60fps 上限。双源时两路文本在此串行化，互不撕裂。
+        self._pending: list[tuple[str, bool, str]] = []
         self._flush_timer = QTimer(self)
         self._flush_timer.setSingleShot(True)
         self._flush_timer.setInterval(16)
@@ -338,6 +339,25 @@ class SubtitlePanel(QWidget):
         except Exception as e:
             print(f"[ui] 枚举 loopback 设备失败: {e}")
 
+        # 麦克风设备下拉（与"声音源"分离：麦克风是独立输入路径，互不干扰）
+        self.mic_combo = _PopupCombo()
+        self.mic_combo.addItem("（默认麦克风）", None)
+        try:
+            for d in list_microphone_devices():
+                label = d.name + (" [默认]" if d.is_default_output else "")
+                self.mic_combo.addItem(label, d.name)
+        except Exception as e:
+            print(f"[ui] 枚举麦克风设备失败: {e}")
+
+        # 两路输入源开关（checkable）。运行中禁用，下次开始识别生效（与 device_combo 一致）。
+        # 首启默认：电脑声音开、麦克风关（保持老用户体验）。
+        self.sys_toggle = QPushButton("🔊 机:开")
+        self.sys_toggle.setCheckable(True)
+        self.sys_toggle.setChecked(True)
+        self.mic_toggle = QPushButton("🎤 麦:关")
+        self.mic_toggle.setCheckable(True)
+        self.mic_toggle.setChecked(False)
+
         self.start_btn = QPushButton("▶ 开始")
         self.stop_btn = QPushButton("■ 停止")
         self.clear_btn = QPushButton("清空")
@@ -384,6 +404,21 @@ class SubtitlePanel(QWidget):
         self._device_label = QLabel("声音源：")
         tb.addWidget(self._device_label)
         tb.addWidget(self.device_combo)
+        self._add_expanding(tb, self.sys_toggle)
+        # 麦克风开关 + 设备下拉（仅当麦克风启用时可选设备）
+        tb.addWidget(self.mic_toggle)
+        self._mic_combo_container = QWidget()
+        mc = QHBoxLayout(self._mic_combo_container)
+        mc.setContentsMargins(0, 0, 0, 0)
+        mc.setSpacing(4)
+        self._mic_label = QLabel("麦：")
+        mc.addWidget(self._mic_label)
+        mc.addWidget(self.mic_combo)
+        tb.addWidget(self._mic_combo_container)
+        self.mic_combo.setEnabled(self.mic_toggle.isChecked())
+        self._mic_combo_container.setVisible(self.mic_toggle.isChecked())
+        self.sys_toggle.toggled.connect(self._on_sys_toggle)
+        self.mic_toggle.toggled.connect(self._on_mic_toggle)
         self._add_expanding(tb, self.start_btn)
         self._add_expanding(tb, self.stop_btn)
         self._add_expanding(tb, self.clear_btn)
@@ -909,31 +944,65 @@ class SubtitlePanel(QWidget):
                                      self._theme_mgr.current.name)
 
     # ---------- 对外接口 ----------
-    def emit_text(self, text: str, is_final: bool):
+    def emit_text(self, text: str, is_final: bool, source: str = "system"):
         """跨线程安全：只 emit 信号。Qt 会用 QueuedConnection 把调用送到主线程。
         绝不能在这里直接操作 QTimer/QWidget（它们属于主线程），否则 PySide6 报
         'startTimer from another thread'。"""
-        self._text_appended.emit(text, is_final)
+        self._text_appended.emit(text, is_final, source)
 
-    def _on_text_appended(self, text: str, is_final: bool):
+    def _on_text_appended(self, text: str, is_final: bool, source: str = "system"):
         """主线程槽：累积到 buffer + 节流 flush（这里操作 QTimer 安全）。"""
-        self._pending_text += text
-        if is_final:
-            self._pending_has_final = True
+        self._pending.append((text, is_final, source))
         if not self._flush_timer.isActive():
             self._flush_timer.start()
 
     def _flush_pending_text(self):
-        """定时器到点：把累积的文本一次性插入文档。"""
-        if not self._pending_text:
+        """定时器到点：把累积的文本一次性插入文档（按到达顺序逐条插入）。"""
+        if not self._pending:
             return
-        text = self._pending_text
-        self._pending_text = ""
-        had_final = self._pending_has_final
-        self._pending_has_final = False
-        # 自动分行：句末标点或引擎边界（is_final）处插换行。
-        text = self._line_breaker.feed(text, had_final)
-        self._insert_text(text)
+        items = self._pending
+        self._pending = []
+        # 合并同源的连续片段以减少富文本碎片（相邻同源 + 同 final 标志的合成一条）
+        merged: list[tuple[str, bool, str]] = []
+        for text, is_final, source in items:
+            if merged and merged[-1][2] == source and merged[-1][1] == is_final:
+                mt, mf, ms = merged[-1]
+                merged[-1] = (mt + text, mf, ms)
+            else:
+                merged.append((text, is_final, source))
+        # 自动分行：对每条文本过 line_breaker（按句末标点或引擎边界插 \n）。
+        # line_breaker 返回的字符串里 \n 是唯一的换行标记；按 \n split 成若干段，
+        # 每段一个彩色 span，段间用纯文本 \n 换行（避免 insertHtml 吞 <br>）。
+        # 末尾若以 \n 结尾，split 会产生一个空串尾巴——需要保留对应的换行。
+        bar = self.view.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - bar.singleStep()
+        saved_pos = bar.value()
+        cursor = QTextCursor(self.view.document())
+        cursor.movePosition(QTextCursor.End)
+        cursor.beginEditBlock()
+        for text, is_final, source in merged:
+            if not text:
+                continue
+            processed = self._line_breaker.feed(text, is_final)
+            # 注意：split("\n") 在末尾有 \n 时会多一个空串元素，保留它能确保
+            # 下面的"每两个段之间插换行"逻辑自动在末尾也补上换行。
+            segments = processed.split("\n")
+            for i, seg in enumerate(segments):
+                if i > 0:
+                    cursor.insertText("\n")
+                if seg:
+                    color, icon = self._source_style(source)
+                    safe = html.escape(seg)
+                    cursor.insertHtml(f'<span style="color:{color};">{icon}{safe}</span>')
+            self._trim_if_needed()
+        cursor.endEditBlock()
+        # 锁定模式：强制跟到底
+        if getattr(self.ui_cfg, "lock_scroll_to_bottom", False):
+            bar.setValue(bar.maximum())
+        elif at_bottom:
+            bar.setValue(bar.maximum())
+        else:
+            bar.setValue(saved_pos)
         if not self._grabbing_skin_background:
             self.preview_state_changed.emit()
 
@@ -941,17 +1010,30 @@ class SubtitlePanel(QWidget):
         self.status_label.setText(text)
 
     # ---------- 字幕插入文档（实际渲染，主线程）----------
-    def _insert_text(self, text: str):
+    def _source_style(self, source: str) -> tuple[str, str]:
+        """返回 (颜色, 图标) 用于按来源上色。电脑声音跟随主题文本色，麦克风用 mic_color。"""
+        if source == "mic":
+            color = getattr(self.ui_cfg, "mic_color", None) or "#5aa9ff"
+            return color, "🎤 "
+        # system / 未知来源：用主题文本色，🔊 前缀
+        theme = self._theme_mgr.current if self._theme_mgr else None
+        color = (theme.colors.subtitle_text if theme else "#f2f2f2")
+        return color, "🔊 "
+
+    def _insert_text(self, text: str, source: str = "system"):
+        """单条文本插入（保留给皮肤编辑器等老调用方；主字幕走 _flush_pending_text）。"""
         bar = self.view.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - bar.singleStep()
         saved_pos = bar.value()
+        color, icon = self._source_style(source)
+        safe = html.escape(text)
+        snippet = f'<span style="color:{color};">{icon}{safe}</span>'
         cursor = QTextCursor(self.view.document())
         cursor.movePosition(QTextCursor.End)
         cursor.beginEditBlock()
-        cursor.insertText(text)
+        cursor.insertHtml(snippet)
         self._trim_if_needed()
         cursor.endEditBlock()
-        # 锁定模式：强制跟到底
         if getattr(self.ui_cfg, "lock_scroll_to_bottom", False):
             bar.setValue(bar.maximum())
         elif at_bottom:
@@ -985,13 +1067,23 @@ class SubtitlePanel(QWidget):
 
     def _on_start(self):
         dev = self.device_combo.currentData()
+        mic_dev = self.mic_combo.currentData() if self.mic_toggle.isChecked() else None
+        sys_on = self.sys_toggle.isChecked()
+        mic_on = self.mic_toggle.isChecked()
+        # 至少要开一路
+        if not sys_on and not mic_on:
+            self.set_status("请至少开启一路输入源（电脑声音或麦克风）")
+            return
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.device_combo.setEnabled(False)
+        self.mic_combo.setEnabled(False)
+        self.sys_toggle.setEnabled(False)
+        self.mic_toggle.setEnabled(False)
         self.set_status("启动中……")
         if self.on_start:
             try:
-                self.on_start(dev)
+                self.on_start(dev, mic_dev, sys_enabled=sys_on, mic_enabled=mic_on)
             except Exception as e:
                 self.set_status(f"出错：{e}")
                 self._reset_buttons()
@@ -1006,6 +1098,18 @@ class SubtitlePanel(QWidget):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.device_combo.setEnabled(True)
+        self.mic_combo.setEnabled(self.mic_toggle.isChecked())
+        self.sys_toggle.setEnabled(True)
+        self.mic_toggle.setEnabled(True)
+
+    def _on_sys_toggle(self, checked: bool):
+        self.sys_toggle.setText("🔊 机:开" if checked else "🔊 机:关")
+
+    def _on_mic_toggle(self, checked: bool):
+        self.mic_toggle.setText("🎤 麦:开" if checked else "🎤 麦:关")
+        # 麦克风关闭时隐藏设备下拉，减少工具栏占用
+        self.mic_combo.setEnabled(checked)
+        self._mic_combo_container.setVisible(checked)
 
     def _on_close(self):
         action = getattr(self.ui_cfg, "close_action", "ask")
@@ -1129,6 +1233,32 @@ class SubtitlePanel(QWidget):
             out.append((self.device_combo.itemText(i), self.device_combo.itemData(i)))
         return out
 
+    def get_mic_devices(self):
+        """麦克风设备列表（供设置对话框用）。"""
+        out = []
+        for i in range(self.mic_combo.count()):
+            out.append((self.mic_combo.itemText(i), self.mic_combo.itemData(i)))
+        return out
+
+    def get_source_states(self) -> tuple[bool, bool]:
+        """返回 (电脑声音启用, 麦克风启用) —— 当前工具栏开关状态。"""
+        return self.sys_toggle.isChecked(), self.mic_toggle.isChecked()
+
+    def set_source_states(self, sys_enabled: bool, mic_enabled: bool) -> None:
+        """同步两路开关状态（设置对话框/启动时用，不触发重复信号风暴）。"""
+        self.sys_toggle.blockSignals(True)
+        self.mic_toggle.blockSignals(True)
+        try:
+            self.sys_toggle.setChecked(bool(sys_enabled))
+            self.mic_toggle.setChecked(bool(mic_enabled))
+            self.sys_toggle.setText("🔊 机:开" if sys_enabled else "🔊 机:关")
+            self.mic_toggle.setText("🎤 麦:开" if mic_enabled else "🎤 麦:关")
+            self.mic_combo.setEnabled(bool(mic_enabled))
+            self._mic_combo_container.setVisible(bool(mic_enabled))
+        finally:
+            self.sys_toggle.blockSignals(False)
+            self.mic_toggle.blockSignals(False)
+
     def is_recording(self) -> bool:
         return self.stop_btn.isEnabled()
 
@@ -1225,21 +1355,14 @@ class SubtitlePanel(QWidget):
 
     # ---------- 识别控制 ----------
     def start_recognition(self, device_name=None):
-        if device_name is None:
-            device_name = self.device_combo.currentData()
-        self._on_start_with_device(device_name)
+        """程序化启动（设置对话框的"开始"按钮用）。走和工具栏 _on_start 一致的双源逻辑：
+        device_name 显式传入时只影响电脑声音设备；麦克风与两路开关仍读工具栏当前状态。"""
+        if device_name is not None:
+            # 临时把指定设备选进下拉，让 _on_start 读到
+            idx = self.device_combo.findData(device_name)
+            if idx >= 0:
+                self.device_combo.setCurrentIndex(idx)
+        self._on_start()
 
     def stop_recognition(self):
         self._on_stop()
-
-    def _on_start_with_device(self, device_name):
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.device_combo.setEnabled(False)
-        self.set_status("启动中……")
-        if self.on_start:
-            try:
-                self.on_start(device_name)
-            except Exception as e:
-                self.set_status(f"出错：{e}")
-                self._reset_buttons()

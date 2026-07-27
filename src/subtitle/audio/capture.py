@@ -62,6 +62,47 @@ def _find_loopback(speaker_name_hint: Optional[str] = None):
     return None
 
 
+def list_microphone_devices() -> list[CaptureDeviceInfo]:
+    """列出可用麦克风输入设备（非 loopback）。延迟 import soundcard。"""
+    import soundcard as sc
+    default_mic_name: Optional[str]
+    try:
+        default_mic_name = sc.default_microphone().name
+    except Exception:
+        default_mic_name = None
+    out: list[CaptureDeviceInfo] = []
+    for m in sc.all_microphones(include_loopback=False):
+        # 排除 loopback（all_microphones(include_loopback=False) 理论上不含，
+        # 但部分驱动会把 loopback 也列出来，这里显式过滤更稳）
+        if getattr(m, "isloopback", False):
+            continue
+        out.append(CaptureDeviceInfo(
+            name=m.name,
+            isloopback=False,
+            is_default_output=(m.name == default_mic_name) if default_mic_name else False,
+        ))
+    return out
+
+
+def _find_microphone(name_hint: Optional[str] = None):
+    """选定麦克风设备：优先按名匹配，否则用系统默认麦克风，兜底任意麦克风。延迟 import。"""
+    import soundcard as sc
+    mics = [m for m in sc.all_microphones(include_loopback=False)
+            if not getattr(m, "isloopback", False)]
+    if name_hint:
+        for m in mics:
+            if name_hint.lower() in (m.name or "").lower():
+                return m
+    try:
+        return sc.default_microphone()
+    except Exception:
+        pass
+    # 兜底：任意真实麦克风
+    for m in mics:
+        return m
+    return None
+
+
 class SystemAudioCapture(threading.Thread):
     """后台线程：持续把系统声音的 PCM 块塞进 queue。
 
@@ -133,3 +174,76 @@ class SystemAudioCapture(threading.Thread):
                 except queue.Full:
                     pass  # 推理跟不上时丢块，保证实时性
         print("[capture] 录音流已关闭")
+
+
+class MicrophoneCapture(threading.Thread):
+    """后台线程：持续把麦克风输入的 PCM 块塞进 queue。
+
+    与 SystemAudioCapture 同构（同样的 recorder/queue/stop 协议），只是设备发现
+    用 _find_microphone（非 loopback 的真实麦克风）。让 pipeline 能以统一方式驱动
+    电脑声音与麦克风两路独立采集。
+
+    用法：
+        cap = MicrophoneCapture(target_sr=16000, block_samples=9600)
+        cap.start()
+        chunk = cap.queue.get()   # np.ndarray float32, mono
+        cap.stop()
+    """
+
+    def __init__(
+        self,
+        target_sr: int = 16000,
+        block_samples: int = 9600,
+        mic_name: Optional[str] = None,
+    ):
+        super().__init__(daemon=True)
+        self.target_sr = target_sr
+        self.block_samples = block_samples
+        self.mic_name = mic_name
+        self.queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=64)
+        self._stop = threading.Event()
+        self._recorder_ctx = None
+        self._mic = None
+        self.actual_sr: Optional[int] = None
+        self.error: Optional[str] = None
+
+    def run(self):
+        try:
+            self._run_loop()
+        except Exception as e:
+            self.error = str(e)
+            print(f"[mic-capture] 异常: {e}")
+
+    def stop(self):
+        self._stop.set()
+        try:
+            self.join(timeout=2)
+        except Exception:
+            pass
+
+    def _run_loop(self):
+        mic = _find_microphone(self.mic_name)
+        if mic is None:
+            raise RuntimeError("没找到麦克风设备，确认系统已连接麦克风并授权")
+        self._mic = mic
+        print(f"[mic-capture] 麦克风源: {mic.name}")
+
+        block = self.block_samples
+        with mic.recorder(samplerate=self.target_sr, channels=1, blocksize=block) as rec:
+            self.actual_sr = self.target_sr
+            print(f"[mic-capture] 录音流已打开 ({self.target_sr}Hz mono, block~{block})")
+            while not self._stop.is_set():
+                try:
+                    data = rec.record(numframes=block)
+                except Exception as e:
+                    if self._stop.is_set():
+                        break
+                    print(f"[mic-capture] record 异常: {e}")
+                    time.sleep(0.05)
+                    continue
+                mono = np.asarray(data, dtype=np.float32).reshape(-1)
+                try:
+                    self.queue.put(mono, timeout=1)
+                except queue.Full:
+                    pass
+        print("[mic-capture] 录音流已关闭")

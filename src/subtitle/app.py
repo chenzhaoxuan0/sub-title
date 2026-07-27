@@ -9,7 +9,6 @@ from PySide6.QtWidgets import QApplication
 
 from .config import load_config, DEFAULT_CONFIG_PATH, default_config_path
 from .asr import create_engine
-from .asr.base import AsrEngine
 from .pipeline import SubtitlePipeline
 from .ui import SubtitlePanel, TrayController, SettingsDialog, get_theme_manager
 from . import credentials, paths
@@ -100,7 +99,7 @@ def _apply_first_run_recommendation() -> None:
         print(f"[startup] 硬件检测失败，沿用默认配置: {e}")
         return
 
-    asr_section = {"engine_type": engine_type, **overrides}
+    asr_section = {"system": {"engine_type": engine_type, **overrides}}
     try:
         config_file.parent.mkdir(parents=True, exist_ok=True)
         with open(config_file, "w", encoding="utf-8") as f:
@@ -115,39 +114,75 @@ def _apply_first_run_recommendation() -> None:
 
 
 class _PipelineWorker(QObject):
+    """按启用情况创建并管理 1~2 个单源 pipeline（电脑声音 / 麦克风）。
+
+    每个 pipeline 拥有独立的 capture + engine 实例，source 标签随结果回调透传，
+    让两路字幕在 UI 里按来源区分展示。两路互不影响：一路出错只报错该路，另一路继续。
+    """
     started = Signal()
     failed = Signal(str)
-    text = Signal(str, bool)
-    audio_level = Signal(float, float)
+    text = Signal(str, bool, str)           # (text, is_final, source)
+    audio_level = Signal(float, float, str)  # (rms, peak, source)
 
-    def __init__(self, cfg, device_name):
+    def __init__(self, cfg, device_name, mic_device_name,
+                 sys_enabled=None, mic_enabled=None):
         super().__init__()
         self.cfg = cfg
         self.device_name = device_name
-        self.engine: AsrEngine | None = None
-        self.pipeline: SubtitlePipeline | None = None
+        self.mic_device_name = mic_device_name
+        # None 时回落到 cfg 里的值（兼容只传设备名的调用方）
+        self.sys_enabled = cfg.audio.system_audio_enabled if sys_enabled is None else bool(sys_enabled)
+        self.mic_enabled = cfg.audio.mic_enabled if mic_enabled is None else bool(mic_enabled)
+        self._pipelines: list[SubtitlePipeline] = []
+
+    def _make_pipeline(self, source: str, device_name) -> SubtitlePipeline:
+        """创建一个单源 pipeline。source 决定 capture_kind + engine 的来源标签。"""
+        def on_result(text: str, is_final: bool, src: str = source):
+            self.text.emit(text, is_final, src)
+        engine = create_engine(self.cfg, on_result=on_result, source=source)
+        return SubtitlePipeline(
+            self.cfg, engine,
+            on_text=lambda t, f, s: self.text.emit(t, f, s),
+            on_audio_level=lambda rms, peak, s: self.audio_level.emit(rms, peak, s),
+            source=source,
+            capture_kind=source,
+            device_name=device_name,
+        )
 
     def run(self):
         try:
             if self.device_name:
                 self.cfg.audio.input_device = self.device_name
-            def on_result(text: str, is_final: bool):
-                self.text.emit(text, is_final)
-            self.engine = create_engine(self.cfg, on_result=on_result)
-            self.pipeline = SubtitlePipeline(
-                self.cfg, self.engine,
-                on_text=lambda t, f: self.text.emit(t, f),
-                on_audio_level=lambda rms, peak: self.audio_level.emit(rms, peak),
-            )
-            self.pipeline.start()
+            if self.mic_device_name:
+                self.cfg.audio.mic_device = self.mic_device_name
+            # 同步当前启用状态回 cfg（供 _save_config 持久化）
+            self.cfg.audio.system_audio_enabled = self.sys_enabled
+            self.cfg.audio.mic_enabled = self.mic_enabled
+
+            # 至少要开一路
+            if not self.sys_enabled and not self.mic_enabled:
+                raise RuntimeError("电脑声音和麦克风都未启用，请至少开启一路输入源")
+
+            if self.sys_enabled:
+                self._pipelines.append(self._make_pipeline("system", self.device_name))
+            if self.mic_enabled:
+                self._pipelines.append(self._make_pipeline("mic", self.mic_device_name))
+
+            # 逐个启动；任一路启动失败 → 整体失败（已启动的会在外层 stop 里被回收）
+            for p in self._pipelines:
+                p.start()
             self.started.emit()
         except Exception as e:
             self.failed.emit(str(e))
 
     def stop(self):
-        if self.pipeline is not None:
-            self.pipeline.stop()
-            self.pipeline = None
+        # 反向停止（后启动的先停），逐个 join
+        for p in reversed(self._pipelines):
+            try:
+                p.stop()
+            except Exception as e:
+                print(f"[worker] pipeline.stop 异常: {e}")
+        self._pipelines.clear()
 
 
 class SubtitleApp:
@@ -220,23 +255,37 @@ class SubtitleApp:
         self.tray.refresh_theme()
 
     # ---------- pipeline ----------
-    def _start(self, device_name):
+    def _start(self, device_name, mic_device_name=None,
+               sys_enabled=None, mic_enabled=None):
+        """启动识别。device_name=电脑声音设备，mic_device_name=麦克风设备。
+        sys_enabled / mic_enabled 控制各路是否启用（None 时用 cfg 里的当前值）。"""
         # 防重入：快速连点开始时忽略后续
         if self._starting:
             return
         self._starting = True
         try:
             self._stop()
-            self.panel.set_status("加载模型中（首次较慢）……")
+            parts = []
+            if sys_enabled if sys_enabled is not None else self.cfg.audio.system_audio_enabled:
+                parts.append("电脑声音")
+            if mic_enabled if mic_enabled is not None else self.cfg.audio.mic_enabled:
+                parts.append("麦克风")
+            label = " + ".join(parts) if parts else "识别"
+            self.panel.set_status(f"加载模型中（{label}，首次较慢）……")
             self._thread = QThread()
-            self._worker = _PipelineWorker(self.cfg, device_name)
+            self._worker = _PipelineWorker(
+                self.cfg, device_name, mic_device_name,
+                sys_enabled=sys_enabled, mic_enabled=mic_enabled,
+            )
             self._worker.moveToThread(self._thread)
             self._thread.started.connect(self._worker.run)
             self._worker.started.connect(self._on_started)
             self._worker.failed.connect(self._on_failed)
-            self._worker.text.connect(lambda t, f: self.panel.emit_text(t, f))
-            self._worker.text.connect(self.skin_runtime.on_text)
-            self._worker.audio_level.connect(self.skin_runtime.on_audio_level)
+            # 字幕：按 source 上色展示（丢掉 source 给皮肤的 lambda 见下）
+            self._worker.text.connect(lambda t, f, s: self.panel.emit_text(t, f, s))
+            # 皮肤触发器：对 source 透明（合并文本触发，不破坏现有皮肤配置）
+            self._worker.text.connect(lambda t, f, s: self.skin_runtime.on_text(t, f))
+            self._worker.audio_level.connect(lambda r, p, s: self.skin_runtime.on_audio_level(r, p))
             self._thread.start()
         finally:
             self._starting = False

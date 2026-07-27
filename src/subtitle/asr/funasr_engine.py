@@ -19,8 +19,8 @@ from .base import AsrEngine, OnResult
 
 
 class FunAsrEngine(AsrEngine):
-    def __init__(self, cfg, on_result: OnResult):
-        super().__init__(cfg, on_result)
+    def __init__(self, cfg, on_result: OnResult, source: str = "system"):
+        super().__init__(cfg, on_result, source=source)
         self.model = None
         self.cache: dict = {}
         self._closed = False
@@ -83,7 +83,7 @@ class FunAsrEngine(AsrEngine):
             if res and res[0].get("text"):
                 raw = res[0]["text"]
                 text = self._punctuate(raw) if self._punc_model else raw
-                self.on_result(text, False)
+                self.on_result(text, False, self.source)
         except Exception as e:
             print(f"[funasr] feed 异常，重置 cache: {e}")
             self.cache = {}   # 异常后重置，避免半更新状态污染下一段

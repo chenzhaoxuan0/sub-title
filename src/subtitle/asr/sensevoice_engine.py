@@ -25,8 +25,8 @@ def _strip_tags(text: str) -> str:
 
 
 class SenseVoiceEngine(AsrEngine):
-    def __init__(self, cfg, on_result: OnResult):
-        super().__init__(cfg, on_result)
+    def __init__(self, cfg, on_result: OnResult, source: str = "system"):
+        super().__init__(cfg, on_result, source=source)
         self.model = None
         self._buf = np.zeros(0, dtype=np.float32)
         self._segment_samples = 0
@@ -86,7 +86,7 @@ class SenseVoiceEngine(AsrEngine):
             if res and res[0].get("text"):
                 text = _strip_tags(res[0]["text"])
                 if text:
-                    self.on_result(text, is_final=True)
+                    self.on_result(text, is_final=True, source=self.source)
         except Exception as e:
             print(f"[sensevoice] 推理异常: {e}")
             # buf 已在开头清空，状态一致

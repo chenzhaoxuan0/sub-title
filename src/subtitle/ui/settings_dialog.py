@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
 )
 
-from ..config import Config
+from ..config import Config, AsrConfig
 from .. import credentials
 from .theme_engine import (
     Theme, ThemeColors, ThemeGeometry, ThemeManager,
@@ -77,6 +77,194 @@ class ColorButton(QPushButton):
 # ------------------------------------------------------------------
 def _row(title: str, content: str, widget: QWidget) -> SettingCard:
     return SettingCard(title, content, widget)
+
+
+class EngineConfigCard(SettingCard):
+    """单路引擎配置卡片（可复用）：引擎选择 + 各引擎参数。
+
+    电脑声音和麦克风各用一个实例，分别读写各自的 AsrConfig（cfg.asr.system / cfg.asr.mic）。
+    引擎选择联动 QStackedWidget 显示对应引擎的参数面板。阿里云凭证不在此卡片内
+    （凭证全局唯一、两路共用，放在识别页独立的凭证卡片）。
+    """
+
+    # 引擎下拉项：(显示名, engine_type)。顺序与 _stack 索引映射对应。
+    _ENGINE_ITEMS = [
+        ("本地 FunASR（流式，需GPU）", "funasr"),
+        ("本地 SenseVoice（小模型，CPU可跑）", "sensevoice"),
+        ("本地 Whisper（faster-whisper，多语言+翻译）", "faster_whisper"),
+        ("阿里云 API（流式，任意平台）", "aliyun"),
+    ]
+    # engine_type → stack 索引（funasr=0, sensevoice=1, faster_whisper=2, aliyun=3）
+    _STACK_INDEX = {"funasr": 0, "sensevoice": 1, "faster_whisper": 2, "aliyun": 3}
+
+    def __init__(self, title: str, content: str, parent=None):
+        super().__init__(title, content, None, parent=parent)
+        self._fw_available = True
+        container = QWidget()
+        cl = QVBoxLayout(container)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(6)
+
+        # 引擎选择
+        self.engine_combo = QComboBox()
+        for label, etype in self._ENGINE_ITEMS:
+            self.engine_combo.addItem(label, etype)
+        self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
+        cl.addWidget(self.engine_combo)
+
+        # 各引擎参数（QStackedWidget）
+        self.stack = QStackedWidget()
+        self._build_funasr_panel()
+        self._build_sensevoice_panel()
+        self._build_faster_whisper_panel()
+        self._build_aliyun_panel()
+        cl.addWidget(self.stack)
+
+        self.set_widget(container)
+
+    # ---- 各引擎参数面板 ----
+    def _build_funasr_panel(self):
+        panel = QWidget()
+        lp = QVBoxLayout(panel)
+        lp.setContentsMargins(0, 0, 0, 0)
+        lp.setSpacing(4)
+        self.funasr_device_combo = QComboBox()
+        self.funasr_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
+        self.funasr_device_combo.addItem("CPU", "cpu")
+        lp.addWidget(_row("FunASR 设备", "推理设备，GPU 更快", self.funasr_device_combo))
+        self.funasr_punc_check = ToggleSwitch()
+        lp.addWidget(_row("流式标点", "补标点以支持自动分行（首次下载~300-700MB）", self.funasr_punc_check))
+        lp.addStretch(1)
+        self.stack.addWidget(panel)
+
+    def _build_sensevoice_panel(self):
+        panel = QWidget()
+        lp = QVBoxLayout(panel)
+        lp.setContentsMargins(0, 0, 0, 0)
+        lp.setSpacing(4)
+        self.sv_device_combo = QComboBox()
+        self.sv_device_combo.addItem("CPU（推荐，Mac/弱GPU）", "cpu")
+        self.sv_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
+        lp.addWidget(_row("SenseVoice 设备", "推理设备", self.sv_device_combo))
+        self.sv_segment_spin = QDoubleSpinBox()
+        self.sv_segment_spin.setRange(0.5, 5.0)
+        self.sv_segment_spin.setSingleStep(0.5)
+        self.sv_segment_spin.setSuffix(" 秒")
+        lp.addWidget(_row("攒段时长", "越小延迟越低但易切词", self.sv_segment_spin))
+        lp.addStretch(1)
+        self.stack.addWidget(panel)
+
+    def _build_faster_whisper_panel(self):
+        panel = QWidget()
+        lp = QVBoxLayout(panel)
+        lp.setContentsMargins(0, 0, 0, 0)
+        lp.setSpacing(4)
+        try:
+            import faster_whisper  # noqa: F401
+            self._fw_available = True
+        except ImportError:
+            self._fw_available = False
+        self.fw_model_combo = QComboBox()
+        for name, label in [("large-v3-turbo", "large-v3-turbo（推荐，快+准）"),
+                            ("large-v3", "large-v3（最准，慢）"),
+                            ("medium", "medium（中等）"),
+                            ("small", "small（最快，弱机器）"),
+                            ("distil-large-v3", "distil-large-v3（仅英文，最快）")]:
+            self.fw_model_combo.addItem(label, name)
+        lp.addWidget(_row("Whisper 模型", "首用从 HF Hub 自动下载", self.fw_model_combo))
+        self.fw_device_combo = QComboBox()
+        self.fw_device_combo.addItem("auto（自动检测，推荐）", "auto")
+        self.fw_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
+        self.fw_device_combo.addItem("CPU", "cpu")
+        lp.addWidget(_row("设备", "auto=有GPU用GPU否则CPU，不崩", self.fw_device_combo))
+        self.fw_compute_combo = QComboBox()
+        for cv, label in [("auto", "auto（自动）"),
+                          ("float16", "float16（GPU）"),
+                          ("int8", "int8（CPU 最快）"),
+                          ("int8_float16", "int8_float16（省显存）")]:
+            self.fw_compute_combo.addItem(label, cv)
+        lp.addWidget(_row("计算精度", "auto=GPU用float16/CPU用int8", self.fw_compute_combo))
+        self.fw_lang_combo = QComboBox()
+        self.fw_lang_combo.addItem("中文", "zh")
+        self.fw_lang_combo.addItem("自动检测", "auto")
+        self.fw_lang_combo.addItem("英文", "en")
+        self.fw_lang_combo.addItem("日文", "ja")
+        lp.addWidget(_row("语言", "影响识别准确度，中文建议指定", self.fw_lang_combo))
+        self.fw_beam_spin = QSpinBox()
+        self.fw_beam_spin.setRange(1, 10)
+        lp.addWidget(_row("beam_size", "1 最快（turbo 鲁棒），5 默认更准", self.fw_beam_spin))
+        self.fw_seg_spin = QDoubleSpinBox()
+        self.fw_seg_spin.setRange(0.5, 5.0)
+        self.fw_seg_spin.setSingleStep(0.5)
+        self.fw_seg_spin.setSuffix(" 秒")
+        lp.addWidget(_row("攒段时长", "越小延迟越低但易切词", self.fw_seg_spin))
+        if not self._fw_available:
+            hint_fw = QLabel("⚠️ faster-whisper 未安装。多语言/翻译引擎需要它：\n"
+                             "pip install faster-whisper（不依赖 torch）")
+            hint_fw.setStyleSheet("color: #c77; font-size: 11px;")
+            hint_fw.setWordWrap(True)
+            lp.addWidget(hint_fw)
+            for w in (self.fw_model_combo, self.fw_device_combo, self.fw_compute_combo,
+                      self.fw_lang_combo, self.fw_beam_spin, self.fw_seg_spin):
+                w.setEnabled(False)
+        lp.addStretch(1)
+        self.stack.addWidget(panel)
+
+    def _build_aliyun_panel(self):
+        panel = QWidget()
+        lp = QVBoxLayout(panel)
+        lp.setContentsMargins(0, 0, 0, 0)
+        lp.setSpacing(4)
+        hint = QLabel("阿里云凭证（AccessKey ID/Secret/AppKey）全局唯一，两路共用。\n"
+                      "请在下方「阿里云凭证」卡片填写，凭证存于系统保险箱。")
+        hint.setStyleSheet("color: #888; font-size: 11px;")
+        hint.setWordWrap(True)
+        lp.addWidget(hint)
+        lp.addStretch(1)
+        self.stack.addWidget(panel)
+
+    # ---- 联动 ----
+    def _on_engine_changed(self, _idx: int):
+        self._sync_stack()
+
+    def _sync_stack(self):
+        etype = self.engine_combo.currentData()
+        self.stack.setCurrentIndex(self._STACK_INDEX.get(etype, 0))
+
+    # ---- 读写 AsrConfig ----
+    def load_from(self, asr: AsrConfig) -> None:
+        idx = self.engine_combo.findData(asr.engine_type)
+        self.engine_combo.setCurrentIndex(max(0, idx))
+        self._sync_stack()
+        self.funasr_device_combo.setCurrentIndex(
+            max(0, self.funasr_device_combo.findData(asr.device)))
+        self.funasr_punc_check.setChecked(asr.funasr_punc_enabled)
+        self.sv_device_combo.setCurrentIndex(
+            max(0, self.sv_device_combo.findData(asr.sensevoice_device)))
+        self.sv_segment_spin.setValue(asr.sensevoice_segment_seconds)
+        self.fw_model_combo.setCurrentIndex(
+            max(0, self.fw_model_combo.findData(asr.faster_whisper_model)))
+        self.fw_device_combo.setCurrentIndex(
+            max(0, self.fw_device_combo.findData(asr.faster_whisper_device)))
+        self.fw_compute_combo.setCurrentIndex(
+            max(0, self.fw_compute_combo.findData(asr.faster_whisper_compute_type)))
+        self.fw_lang_combo.setCurrentIndex(
+            max(0, self.fw_lang_combo.findData(asr.faster_whisper_language)))
+        self.fw_beam_spin.setValue(asr.faster_whisper_beam_size)
+        self.fw_seg_spin.setValue(asr.faster_whisper_segment_seconds)
+
+    def apply_to(self, asr: AsrConfig) -> None:
+        asr.engine_type = self.engine_combo.currentData()
+        asr.device = self.funasr_device_combo.currentData()
+        asr.funasr_punc_enabled = self.funasr_punc_check.isChecked()
+        asr.sensevoice_device = self.sv_device_combo.currentData()
+        asr.sensevoice_segment_seconds = self.sv_segment_spin.value()
+        asr.faster_whisper_model = self.fw_model_combo.currentData()
+        asr.faster_whisper_device = self.fw_device_combo.currentData()
+        asr.faster_whisper_compute_type = self.fw_compute_combo.currentData()
+        asr.faster_whisper_language = self.fw_lang_combo.currentData()
+        asr.faster_whisper_beam_size = self.fw_beam_spin.value()
+        asr.faster_whisper_segment_seconds = self.fw_seg_spin.value()
 
 
 class SettingsDialog(QDialog):
@@ -149,7 +337,26 @@ class SettingsDialog(QDialog):
         self.device_combo = QComboBox()
         for name, data in self.panel.get_devices():
             self.device_combo.addItem(name, data)
-        v.addWidget(_row("输入源", "选择要捕获的系统音频输出设备", self.device_combo))
+        v.addWidget(_row("输入源", "选择要捕获的系统音频输出设备（🔊 电脑声音）", self.device_combo))
+        # 电脑声音开关（与麦克风独立）
+        self.sys_enable_toggle = ToggleSwitch()
+        v.addWidget(_row("启用电脑声音", "🔊 回录系统声音输出（扬声器/耳机）", self.sys_enable_toggle))
+
+        # 麦克风输入（独立路径，与电脑声音分别采集、分别识别、在字幕里区分展示）
+        self.mic_combo = QComboBox()
+        for name, data in self.panel.get_mic_devices():
+            self.mic_combo.addItem(name, data)
+        v.addWidget(_row("麦克风", "🎤 选择麦克风输入设备（与电脑声音分开识别）", self.mic_combo))
+        self.mic_enable_toggle = ToggleSwitch()
+        v.addWidget(_row("启用麦克风", "🎤 识别麦克风语音（双开时占用双倍显存/内存）", self.mic_enable_toggle))
+        # 麦克风字幕颜色
+        self.mic_color_combo = QComboBox()
+        self.mic_color_combo.setEditable(True)
+        for name, val in (("蓝 #5aa9ff", "#5aa9ff"), ("绿 #5ad6a6", "#5ad6a6"),
+                          ("橙 #f0a830", "#f0a830"), ("粉 #f06292", "#f06292"),
+                          ("紫 #b06cf0", "#b06cf0"), ("红 #f06262", "#f06262")):
+            self.mic_color_combo.addItem(name, val)
+        v.addWidget(_row("麦克风字幕颜色", "🎤 麦克风字幕的文字颜色（电脑声音跟随主题色）", self.mic_color_combo))
 
         # 开始/停止（放在一行卡片）
         recog_card = SettingCard("识别控制", "开始或停止实时字幕识别", None)
@@ -166,133 +373,42 @@ class SettingsDialog(QDialog):
         recog_card.set_widget(wb)
         v.addWidget(recog_card)
 
-        # 引擎选择
-        self.engine_combo = QComboBox()
-        self.engine_combo.addItem("本地 FunASR（流式，需GPU）", "funasr")
-        self.engine_combo.addItem("本地 SenseVoice（小模型，CPU可跑）", "sensevoice")
-        self.engine_combo.addItem("本地 Whisper（faster-whisper，多语言+翻译）", "faster_whisper")
-        self.engine_combo.addItem("阿里云 API（流式，任意平台）", "aliyun")
-        self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
-        v.addWidget(_row("识别引擎", "选择语音识别后端", self.engine_combo))
+        # 两路独立的引擎配置卡片（电脑声音 / 麦克风各选各的引擎+参数）
+        self.system_engine_card = EngineConfigCard(
+            "🔊 电脑声音引擎", "电脑声音（系统音频输出）使用的识别引擎及参数")
+        v.addWidget(self.system_engine_card)
+        self.mic_engine_card = EngineConfigCard(
+            "🎤 麦克风引擎", "麦克风使用的识别引擎及参数（可与电脑声音不同，按算力灵活调配）")
+        v.addWidget(self.mic_engine_card)
 
-        # 各引擎配置（QStackedWidget）
-        self.engine_stack = QStackedWidget()
-        # FunASR
-        funasr_panel = QWidget()
-        fp = QVBoxLayout(funasr_panel)
-        fp.setContentsMargins(0, 0, 0, 0)
-        fp.setSpacing(4)
-        self.funasr_device_combo = QComboBox()
-        self.funasr_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
-        self.funasr_device_combo.addItem("CPU", "cpu")
-        fp.addWidget(_row("FunASR 设备", "推理设备，GPU 更快", self.funasr_device_combo))
-        self.funasr_punc_check = ToggleSwitch()
-        fp.addWidget(_row("流式标点", "补标点以支持自动分行（首次下载~300-700MB，需重启识别生效）", self.funasr_punc_check))
-        fp.addStretch(1)
-        self.engine_stack.addWidget(funasr_panel)
-        # SenseVoice
-        sv_panel = QWidget()
-        sp = QVBoxLayout(sv_panel)
-        sp.setContentsMargins(0, 0, 0, 0)
-        sp.setSpacing(4)
-        self.sv_device_combo = QComboBox()
-        self.sv_device_combo.addItem("CPU（推荐，Mac/弱GPU）", "cpu")
-        self.sv_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
-        sp.addWidget(_row("SenseVoice 设备", "推理设备", self.sv_device_combo))
-        self.sv_segment_spin = QDoubleSpinBox()
-        self.sv_segment_spin.setRange(0.5, 5.0)
-        self.sv_segment_spin.setSingleStep(0.5)
-        self.sv_segment_spin.setSuffix(" 秒")
-        sp.addWidget(_row("攒段时长", "越小延迟越低但易切词", self.sv_segment_spin))
-        sp.addStretch(1)
-        self.engine_stack.addWidget(sv_panel)
-        # 阿里云
-        aliyun_panel = QWidget()
-        ap = QVBoxLayout(aliyun_panel)
-        ap.setContentsMargins(0, 0, 0, 0)
-        ap.setSpacing(4)
+        # 阿里云凭证（全局唯一，两路共用——任一路选阿里云 API 都用这套凭证）
+        cred_card = SettingCard("阿里云凭证", "AccessKey ID/Secret/AppKey（两路共用，存系统保险箱）", None)
+        cp = QVBoxLayout()
+        cp.setContentsMargins(0, 0, 0, 0)
+        cp.setSpacing(4)
         self.aliyun_akid_edit = QLineEdit()
         self.aliyun_akid_edit.setPlaceholderText("AccessKey ID")
-        ap.addWidget(_row("AccessKey ID", "阿里云控制台获取", self.aliyun_akid_edit))
+        cp.addWidget(_row("AccessKey ID", "阿里云控制台获取", self.aliyun_akid_edit))
         self.aliyun_aksecret_edit = QLineEdit()
         self.aliyun_aksecret_edit.setPlaceholderText("AccessKey Secret")
         self.aliyun_aksecret_edit.setEchoMode(QLineEdit.Password)
-        ap.addWidget(_row("AccessKey Secret", "阿里云控制台获取", self.aliyun_aksecret_edit))
+        cp.addWidget(_row("AccessKey Secret", "阿里云控制台获取", self.aliyun_aksecret_edit))
         self.aliyun_appkey_edit = QLineEdit()
         self.aliyun_appkey_edit.setPlaceholderText("AppKey")
-        ap.addWidget(_row("AppKey", "智能语音交互项目 AppKey", self.aliyun_appkey_edit))
-        # 提示：凭证会存到系统保险箱（不再写进 config.yaml）
+        cp.addWidget(_row("AppKey", "智能语音交互项目 AppKey", self.aliyun_appkey_edit))
         cred_location = credentials.storage_location()
-        hint = QLabel(
+        cred_hint = QLabel(
             f"🔐 凭证存于系统保险箱（{cred_location}），不进 config.yaml。\n"
-            f"卸载重装或换电脑需要重新填；需先装 nls SDK（见 README）。"
+            f"卸载重装或换电脑需要重新填；需先装 nls SDK（见 README）。\n"
+            f"两路同时用阿里云时会建两个连接共用此凭证。"
         )
-        hint.setStyleSheet("color: #888; font-size: 11px;")
-        hint.setWordWrap(True)
-        ap.addWidget(hint)
-        ap.addStretch(1)
-        # engine_stack 物理索引须与 engine_combo 下拉顺序一致
-        # （funasr=0, sensevoice=1, faster_whisper=2, aliyun=3），
-        # 下拉里 faster_whisper 在 aliyun 之前，故 fw_panel 先入栈、
-        # aliyun_panel 延后到 fw_panel 之后入栈（见函数末尾）。
-        # faster-whisper（CTranslate2 后端，多语言+翻译，不依赖 torch）
-        fw_panel = QWidget()
-        wp = QVBoxLayout(fw_panel)
-        wp.setContentsMargins(0, 0, 0, 0)
-        wp.setSpacing(4)
-        # try import 守卫：未装时置灰 + 提示
-        try:
-            import faster_whisper  # noqa: F401
-            fw_available = True
-        except ImportError:
-            fw_available = False
-        self.fw_model_combo = QComboBox()
-        for name, label in [("large-v3-turbo", "large-v3-turbo（推荐，快+准）"),
-                            ("large-v3", "large-v3（最准，慢）"),
-                            ("medium", "medium（中等）"),
-                            ("small", "small（最快，弱机器）"),
-                            ("distil-large-v3", "distil-large-v3（仅英文，最快）")]:
-            self.fw_model_combo.addItem(label, name)
-        wp.addWidget(_row("Whisper 模型", "首用从 HF Hub 自动下载", self.fw_model_combo))
-        self.fw_device_combo = QComboBox()
-        self.fw_device_combo.addItem("auto（自动检测，推荐）", "auto")
-        self.fw_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
-        self.fw_device_combo.addItem("CPU", "cpu")
-        wp.addWidget(_row("设备", "auto=有GPU用GPU否则CPU，不崩", self.fw_device_combo))
-        self.fw_compute_combo = QComboBox()
-        for cv, label in [("auto", "auto（自动）"),
-                          ("float16", "float16（GPU）"),
-                          ("int8", "int8（CPU 最快）"),
-                          ("int8_float16", "int8_float16（省显存）")]:
-            self.fw_compute_combo.addItem(label, cv)
-        wp.addWidget(_row("计算精度", "auto=GPU用float16/CPU用int8", self.fw_compute_combo))
-        self.fw_lang_combo = QComboBox()
-        self.fw_lang_combo.addItem("中文", "zh")
-        self.fw_lang_combo.addItem("自动检测", "auto")
-        self.fw_lang_combo.addItem("英文", "en")
-        self.fw_lang_combo.addItem("日文", "ja")
-        wp.addWidget(_row("语言", "影响识别准确度，中文建议指定", self.fw_lang_combo))
-        self.fw_beam_spin = QSpinBox()
-        self.fw_beam_spin.setRange(1, 10)
-        wp.addWidget(_row("beam_size", "1 最快（turbo 鲁棒），5 默认更准", self.fw_beam_spin))
-        self.fw_seg_spin = QDoubleSpinBox()
-        self.fw_seg_spin.setRange(0.5, 5.0)
-        self.fw_seg_spin.setSingleStep(0.5)
-        self.fw_seg_spin.setSuffix(" 秒")
-        wp.addWidget(_row("攒段时长", "越小延迟越低但易切词", self.fw_seg_spin))
-        if not fw_available:
-            hint_fw = QLabel("⚠️ faster-whisper 未安装。多语言/翻译引擎需要它：\n"
-                             "pip install faster-whisper（不依赖 torch）")
-            hint_fw.setStyleSheet("color: #c77; font-size: 11px;")
-            hint_fw.setWordWrap(True)
-            wp.addWidget(hint_fw)
-            for w in (self.fw_model_combo, self.fw_device_combo, self.fw_compute_combo,
-                      self.fw_lang_combo, self.fw_beam_spin, self.fw_seg_spin):
-                w.setEnabled(False)
-        wp.addStretch(1)
-        self.engine_stack.addWidget(fw_panel)
-        self.engine_stack.addWidget(aliyun_panel)
-        v.addWidget(self.engine_stack)
+        cred_hint.setStyleSheet("color: #888; font-size: 11px;")
+        cred_hint.setWordWrap(True)
+        cp.addWidget(cred_hint)
+        cp_w = QWidget()
+        cp_w.setLayout(cp)
+        cred_card.set_widget(cp_w)
+        v.addWidget(cred_card)
 
         v.addStretch(1)
         return self._wrap_scroll(tab)
@@ -555,33 +671,28 @@ class SettingsDialog(QDialog):
     # ============================================================
     def _load_current_state(self):
         ui = self.cfg.ui
-        asr = self.cfg.asr
+        audio = self.cfg.audio
         skin = self.cfg.skin
 
         self._update_recog_buttons()
-        idx = self.engine_combo.findData(asr.engine_type)
-        self.engine_combo.setCurrentIndex(max(0, idx))
-        self._sync_engine_panel()
-        self.funasr_device_combo.setCurrentIndex(
-            max(0, self.funasr_device_combo.findData(asr.device)))
-        self.funasr_punc_check.setChecked(asr.funasr_punc_enabled)
-        self.sv_device_combo.setCurrentIndex(
-            max(0, self.sv_device_combo.findData(asr.sensevoice_device)))
-        self.sv_segment_spin.setValue(asr.sensevoice_segment_seconds)
+        # 双输入源：电脑声音 + 麦克风（默认与面板工具栏开关同步）
+        self.sys_enable_toggle.setChecked(audio.system_audio_enabled)
+        self.mic_enable_toggle.setChecked(audio.mic_enabled)
+        idx = self.mic_combo.findData(audio.mic_device)
+        self.mic_combo.setCurrentIndex(max(0, idx))
+        # 麦克风字幕颜色：优先匹配预设，否则作为自定义文本
+        cidx = self.mic_color_combo.findData(ui.mic_color)
+        if cidx >= 0:
+            self.mic_color_combo.setCurrentIndex(cidx)
+        else:
+            self.mic_color_combo.setEditText(ui.mic_color)
+        # 两路独立引擎配置（各自读各自的 AsrConfig）
+        self.system_engine_card.load_from(self.cfg.asr.system)
+        self.mic_engine_card.load_from(self.cfg.asr.mic)
+        # 阿里云凭证（全局唯一，从系统保险箱读）
         self.aliyun_akid_edit.setText(credentials.get(credentials.KEY_ALIYUN_AK_ID) or "")
         self.aliyun_aksecret_edit.setText(credentials.get(credentials.KEY_ALIYUN_AK_SECRET) or "")
         self.aliyun_appkey_edit.setText(credentials.get(credentials.KEY_ALIYUN_APPKEY) or "")
-        # faster-whisper
-        self.fw_model_combo.setCurrentIndex(
-            max(0, self.fw_model_combo.findData(asr.faster_whisper_model)))
-        self.fw_device_combo.setCurrentIndex(
-            max(0, self.fw_device_combo.findData(asr.faster_whisper_device)))
-        self.fw_compute_combo.setCurrentIndex(
-            max(0, self.fw_compute_combo.findData(asr.faster_whisper_compute_type)))
-        self.fw_lang_combo.setCurrentIndex(
-            max(0, self.fw_lang_combo.findData(asr.faster_whisper_language)))
-        self.fw_beam_spin.setValue(asr.faster_whisper_beam_size)
-        self.fw_seg_spin.setValue(asr.faster_whisper_segment_seconds)
 
         # 外观
         current_theme = self.panel.get_theme()
@@ -657,14 +768,6 @@ class SettingsDialog(QDialog):
             self.reset_theme_btn.setToolTip("把当前选中的内置主题恢复到出厂默认值")
         # 重命名：内置和自定义都行（内置重命名会复制为新自定义）
         self.rename_theme_btn.setEnabled(bool(name))
-
-    def _on_engine_changed(self, _idx: int):
-        self._sync_engine_panel()
-
-    def _sync_engine_panel(self):
-        etype = self.engine_combo.currentData()
-        idx = {"funasr": 0, "sensevoice": 1, "faster_whisper": 2, "aliyun": 3}.get(etype, 0)
-        self.engine_stack.setCurrentIndex(idx)
 
     def _update_recog_buttons(self):
         running = self.panel.is_recording()
@@ -919,25 +1022,25 @@ class SettingsDialog(QDialog):
 
     def _on_apply(self):
         p = self.panel
-        asr = self.cfg.asr
-        asr.engine_type = self.engine_combo.currentData()
-        asr.device = self.funasr_device_combo.currentData()
-        asr.funasr_punc_enabled = self.funasr_punc_check.isChecked()
-        asr.sensevoice_device = self.sv_device_combo.currentData()
-        asr.sensevoice_segment_seconds = self.sv_segment_spin.value()
+        audio = self.cfg.audio
+        ui = self.cfg.ui
+        # 双输入源开关与设备
+        audio.system_audio_enabled = self.sys_enable_toggle.isChecked()
+        audio.mic_enabled = self.mic_enable_toggle.isChecked()
+        audio.mic_device = self.mic_combo.currentData()
+        ui.mic_color = self.mic_color_combo.currentData() or self.mic_color_combo.currentText() or "#5aa9ff"
+        # 同步面板工具栏开关（让下次开始识别时两路状态一致）
+        p.set_source_states(audio.system_audio_enabled, audio.mic_enabled)
+        # 两路独立引擎配置（各自写各自的 AsrConfig）
+        self.system_engine_card.apply_to(self.cfg.asr.system)
+        self.mic_engine_card.apply_to(self.cfg.asr.mic)
         # 阿里云 AccessKey ID / Secret / AppKey → 写到系统保险箱（不进 config.yaml）
+        # 凭证全局唯一，两路共用一套
         credentials.set_aliyun(
             ak_id=self.aliyun_akid_edit.text().strip(),
             ak_secret=self.aliyun_aksecret_edit.text().strip(),
             appkey=self.aliyun_appkey_edit.text().strip(),
         )
-        # faster-whisper
-        asr.faster_whisper_model = self.fw_model_combo.currentData()
-        asr.faster_whisper_device = self.fw_device_combo.currentData()
-        asr.faster_whisper_compute_type = self.fw_compute_combo.currentData()
-        asr.faster_whisper_language = self.fw_lang_combo.currentData()
-        asr.faster_whisper_beam_size = self.fw_beam_spin.value()
-        asr.faster_whisper_segment_seconds = self.fw_seg_spin.value()
 
         # 外观
         theme_name = self.theme_combo.currentData()

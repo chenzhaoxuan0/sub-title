@@ -25,8 +25,8 @@ from .base import AsrEngine, OnResult
 
 
 class FasterWhisperEngine(AsrEngine):
-    def __init__(self, cfg, on_result: OnResult):
-        super().__init__(cfg, on_result)
+    def __init__(self, cfg, on_result: OnResult, source: str = "system"):
+        super().__init__(cfg, on_result, source=source)
         self.model = None
         self._buf = np.zeros(0, dtype=np.float32)
         self._segment_samples = 0
@@ -109,7 +109,7 @@ class FasterWhisperEngine(AsrEngine):
             # segment.text 已去前导空格；逐段拼成一句
             text = "".join(s.text for s in segments).strip()
             if text:
-                self.on_result(text, is_final=True)
+                self.on_result(text, is_final=True, source=self.source)
         except Exception as e:
             print(f"[faster_whisper] 推理异常: {e}")
             # buf 已在开头清空，状态一致；下一帧继续

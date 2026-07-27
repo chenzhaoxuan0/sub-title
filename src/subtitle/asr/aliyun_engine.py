@@ -29,8 +29,8 @@ _PACKET_BYTES = 640
 
 
 class AliyunEngine(AsrEngine):
-    def __init__(self, cfg, on_result: OnResult):
-        super().__init__(cfg, on_result)
+    def __init__(self, cfg, on_result: OnResult, source: str = "system"):
+        super().__init__(cfg, on_result, source=source)
         self._tr = None
         self._token = None
         self._started = False
@@ -153,14 +153,14 @@ class AliyunEngine(AsrEngine):
             return
         text = self._extract_text(msg)
         if text:
-            self.on_result(text, is_final=False)
+            self.on_result(text, is_final=False, source=self.source)
 
     def _on_sentence_end_cb(self, msg, *args):
         if self._closed:
             return
         text = self._extract_text(msg)
         if text:
-            self.on_result(text, is_final=True)
+            self.on_result(text, is_final=True, source=self.source)
 
     def _on_completed_cb(self, msg, *args):
         print("[aliyun] 会话完成")

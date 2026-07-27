@@ -35,7 +35,15 @@ DEFAULT_CONFIG_PATH = default_config_path()
 class AudioConfig:
     target_sample_rate: int = 16000
     chunk_seconds: float = 0.6
-    input_device: Optional[str] = None
+    input_device: Optional[str] = None        # 电脑声音 loopback 设备（None=默认输出）
+
+    # ---- 双输入源 ----
+    # 麦克风与电脑声音分别采集、分别识别、在字幕里按来源区分展示（🎤/🔊）。
+    # 首启默认只开电脑声音（system_audio_enabled=True），保持老用户体验；
+    # 麦克风需用户在工具栏/设置里手动开启。两路独立 engine 实例，双开时显存/内存翻倍。
+    system_audio_enabled: bool = True         # 是否启用电脑声音（loopback）
+    mic_enabled: bool = False                 # 是否启用麦克风
+    mic_device: Optional[str] = None          # 麦克风设备名（None=系统默认麦克风）
 
 
 @dataclass
@@ -113,6 +121,9 @@ class UiConfig:
     padding_left: Optional[int] = None
     padding_right: Optional[int] = None
     line_spacing: Optional[float] = None
+    # 麦克风字幕颜色（电脑声音用主题 subtitle_text）。走 UiConfig 而非 ThemeColors，
+    # 避免改动主题 JSON 结构与现有主题迁移。
+    mic_color: str = "#5aa9ff"
 
 
 @dataclass
@@ -129,19 +140,58 @@ class SkinConfig:
 
 
 @dataclass
+class AsrProfiles:
+    """双输入源的引擎配置容器：电脑声音与麦克风各自独立的 AsrConfig。
+
+    两路可分别选择不同引擎及参数（如 system=本地 SenseVoice，mic=阿里云 API），
+    用户可按 PC 算力灵活调配。阿里云凭证（AccessKey/AppKey）存系统 keyring，
+    是全局唯一的，两路共用一套——这里只承载引擎类型与参数，不含凭证。
+    """
+    system: AsrConfig = field(default_factory=AsrConfig)   # 🔊 电脑声音
+    mic: AsrConfig = field(default_factory=AsrConfig)      # 🎤 麦克风
+
+    def for_source(self, source: str) -> AsrConfig:
+        """按来源标签取对应的 AsrConfig（factory 用此分发配置）。"""
+        return self.mic if source == "mic" else self.system
+
+
+@dataclass
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
-    asr: AsrConfig = field(default_factory=AsrConfig)
+    asr: AsrProfiles = field(default_factory=AsrProfiles)
     ui: UiConfig = field(default_factory=UiConfig)
     skin: SkinConfig = field(default_factory=SkinConfig)
 
 
+def _build_asr_config(d: dict) -> AsrConfig:
+    """从一个 dict 构建单个 AsrConfig（字段过滤，忽略未知键）。"""
+    return AsrConfig(**{k: v for k, v in d.items()
+                       if k in AsrConfig.__dataclass_fields__})
+
+
 def _build(d: dict[str, Any]) -> Config:
+    # asr 段支持两种格式：
+    #   新格式（嵌套）：asr: {system: {...}, mic: {...}}  —— 两路独立引擎配置
+    #   老格式（平铺）：asr: {engine_type: ..., sensevoice_device: ...}  —— 单一全局配置
+    # 老格式自动迁移：整体作为 system 配置保留，mic 用默认 AsrConfig。
+    asr_raw = d.get("asr", {})
+    if isinstance(asr_raw, dict) and ("system" in asr_raw or "mic" in asr_raw):
+        sys_d = asr_raw.get("system") or {}
+        mic_d = asr_raw.get("mic") or {}
+        asr_profiles = AsrProfiles(
+            system=_build_asr_config(sys_d if isinstance(sys_d, dict) else {}),
+            mic=_build_asr_config(mic_d if isinstance(mic_d, dict) else {}),
+        )
+    elif isinstance(asr_raw, dict) and asr_raw:
+        # 老格式平铺迁移：整体 → system，mic 默认
+        asr_profiles = AsrProfiles(system=_build_asr_config(asr_raw))
+    else:
+        asr_profiles = AsrProfiles()
+
     return Config(
         audio=AudioConfig(**{k: v for k, v in d.get("audio", {}).items()
                              if k in AudioConfig.__dataclass_fields__}),
-        asr=AsrConfig(**{k: v for k, v in d.get("asr", {}).items()
-                         if k in AsrConfig.__dataclass_fields__}),
+        asr=asr_profiles,
         ui=UiConfig(**{k: v for k, v in d.get("ui", {}).items()
                        if k in UiConfig.__dataclass_fields__}),
         skin=SkinConfig(**{k: v for k, v in d.get("skin", {}).items()

@@ -7,21 +7,23 @@ from __future__ import annotations
 from .base import AsrEngine, OnResult
 
 
-def create_engine(cfg, on_result: OnResult) -> AsrEngine:
-    """根据 cfg.asr.engine_type 创建引擎实例。"""
-    engine_type = getattr(cfg.asr, "engine_type", "funasr")
+def create_engine(cfg, on_result: OnResult, source: str = "system") -> AsrEngine:
+    """根据 source 取对应的 AsrConfig（电脑声音/麦克风可独立配置引擎与参数），
+    再按 engine_type 创建引擎实例。source 同时透传给引擎，用于回调时标记来源。"""
+    asr_cfg = cfg.asr.for_source(source)
+    engine_type = getattr(asr_cfg, "engine_type", "funasr")
 
     if engine_type == "funasr":
         from .funasr_engine import FunAsrEngine
-        return FunAsrEngine(cfg.asr, on_result)
+        return FunAsrEngine(asr_cfg, on_result, source=source)
 
     if engine_type == "sensevoice":
         from .sensevoice_engine import SenseVoiceEngine
-        return SenseVoiceEngine(cfg.asr, on_result)
+        return SenseVoiceEngine(asr_cfg, on_result, source=source)
 
     if engine_type == "aliyun":
         from .aliyun_engine import AliyunEngine
-        return AliyunEngine(cfg.asr, on_result)
+        return AliyunEngine(asr_cfg, on_result, source=source)
 
     if engine_type == "faster_whisper":
         try:
@@ -30,7 +32,7 @@ def create_engine(cfg, on_result: OnResult) -> AsrEngine:
             raise ImportError(
                 "faster-whisper 未安装。多语言/翻译引擎需要它，安装：pip install faster-whisper"
             ) from e
-        return FasterWhisperEngine(cfg.asr, on_result)
+        return FasterWhisperEngine(asr_cfg, on_result, source=source)
 
     raise ValueError(
         f"未知引擎类型: {engine_type}（支持: sensevoice/funasr/faster_whisper/aliyun）"
