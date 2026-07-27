@@ -62,8 +62,13 @@
 ### 系统托盘 + 全功能设置
 - 托盘图标 + 右键菜单（显示隐藏 / 开始停止 / 主题 / 置顶 / 设置 / 退出）
 - 关闭窗口默认弹窗询问（隐藏到托盘 / 退出程序），可记忆选择
-- 设置对话框双标签页：
-  - **设置**：识别引擎选择 + 各引擎配置（设备/凭证）、外观、窗口尺寸、滚动行为、字幕文本上限
+- 设置对话框多标签页（左侧导航）：
+  - **识别**：开始/停止、电脑声音与麦克风各自的引擎选择及参数、阿里云凭证
+  - **引擎管理**：各本地引擎依赖安装状态一览，未装时给精确安装命令 + 一键复制（详见 [引擎依赖管理](#引擎依赖管理)）
+  - **说话人**：说话人显示名管理
+  - **外观**：主题、颜色、字体、窗口尺寸
+  - **行为**：滚动、字幕文本上限等
+  - **皮肤**：桌宠贴图
   - **文稿回看**：完整字幕文本查看、刷新、复制、清空
 
 ### 字幕皮肤 / 桌宠贴图
@@ -159,6 +164,42 @@ python -m subtitle
 4. 点「应用」。**凭证会存到操作系统级保险箱**（Windows Credential Manager / macOS Keychain / Linux Secret Service），**不会**写进 `config.yaml`，避免被 git 提交 / 截图 / 同步盘泄露。卸载重装或换电脑需要重新填。
 
 > 阿里云实时语音识别按语音时长计费，新用户通常有免费额度，具体以控制台为准。
+
+## 引擎依赖管理
+
+设置对话框的「**引擎管理**」标签页集中展示各本地引擎依赖的安装状态，**未装时给出精确安装命令 + 一键复制**，复制到终端执行、装完重启程序即可在「识别」页选用。
+
+### 两种使用形态
+
+- **🟢 纯 API 模式（开箱即用）**：只用阿里云引擎，无需安装 torch / funasr 等任何本地依赖。安装包最小、跨平台最稳，弱机器也能跑。只需在「识别」页填凭证。
+- **🟡 本地引擎模式（按需安装）**：要用 SenseVoice / FunASR / Fun-ASR-Nano / Qwen3-ASR / faster-whisper 时，在「引擎管理」页复制对应命令安装，装完重启即可。**装哪个用哪个**，不必一次全装。
+
+### 引擎管理页能做什么
+
+打开 设置 → **引擎管理**，会看到：
+
+- **顶部硬件摘要**：当前 CPU 核数 / 内存 / GPU，用于判断推荐哪条安装命令（有 CUDA → GPU 索引命令；无 CUDA / Mac → CPU 命令）。
+- **每个本地引擎一张卡片**：
+  - 状态徽标：`✅ 已就绪` 或 `⚠️ 未安装（缺少 torch、funasr …）`
+  - 一句话用途 + 安装后大致占用的磁盘空间
+  - 安装命令文本框（只读，可选中）+ **📋 复制** 按钮
+- **底部阿里云卡片**：提示纯 API 模式无需安装，只需填凭证。
+
+依赖探测用 `find_spec`（开销极低），且设置对话框**每次打开都重建实例**——所以你在终端装完依赖、重开设置，就能立即看到对应引擎变成 `✅ 已就绪`，无需重启探测。
+
+### 各引擎的安装命令（与引擎管理页一致）
+
+| 引擎 | 缺失依赖 | 安装命令（按平台/硬件） |
+| --- | --- | --- |
+| **FunASR Paraformer** | `funasr`、`torch` | Windows + CUDA：`pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121` 然后 `pip install funasr`<br>Mac / CPU：`pip install torch torchaudio` 然后 `pip install funasr` |
+| **SenseVoice Small** | `funasr`、`torch` | 同上（CPU 即可跑，Mac 友好） |
+| **Fun-ASR-Nano** | `funasr`、`torch` | 同 FunASR |
+| **Qwen3-ASR** | `qwen_asr`、`torch` | `pip install torch torchaudio`（或 GPU 索引）然后 `pip install qwen-asr`；4-bit 量化另需 `pip install bitsandbytes`（仅 CUDA） |
+| **faster-whisper** | `faster_whisper` | `pip install faster-whisper`（**不依赖 torch**，多语言/翻译） |
+
+> **为什么 funasr 装了还提示缺 torch？** funasr 把 torch 列为安装依赖，但如果你用 `--no-deps` 装过、或手动卸过 torch，`import funasr` 仍会成功（torch 是延迟导入），但真正加载模型时会崩。引擎管理页会分别探测 funasr 和 torch，避免这种"看似装了实则没装"的坑。
+>
+> **macOS 系统声音捕获**：Mac 上 soundcard 原生不支持回录系统输出，需另装免费虚拟声卡 [BlackHole](https://existential.audio/blackhole/) 并在「音频 MIDI 设置」里建多输出设备，重启后即可在设备列表看到。麦克风输入不受影响。
 
 ## 主题管理
 
@@ -337,6 +378,7 @@ sub-title/
 2. 在 `asr/factory.py` 的 `create_engine` 注册新类型
 3. 在 `config.py` 的 `AsrConfig` 加该引擎的配置字段
 4. 在 `settings_dialog.py` 加对应的配置面板
+5. 在 `asr/_install.py` 的 `_ENGINES` 注册该引擎的依赖清单与安装命令（这样「引擎管理」页会自动展示它的安装状态，`factory` 缺失依赖时也会用同一份文案提示）
 
 pipeline 和 UI 完全不用改——这是事件驱动接口的设计目的。
 
