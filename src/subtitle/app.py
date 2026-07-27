@@ -311,18 +311,27 @@ class SubtitleApp:
         from .asr.qwen3_asr_engine import qwen3_asr_available
         if qwen3_asr_available():
             return True
-        script = Path(__file__).resolve().parents[2] / "scripts" / "install_qwen3_asr.bat"
+        import platform
+        # Windows 有现成 .bat 脚本可一键装；macOS/Linux 直接给 pip 指令。
+        if platform.system() == "Windows":
+            script = Path(__file__).resolve().parents[2] / "scripts" / "install_qwen3_asr.bat"
+            install_hint = (
+                "请先关闭本程序，运行以下脚本，完成后重新打开程序：\n"
+                f"{script}\n\n"
+                "或在 subtitle Conda 环境中执行：pip install qwen-asr"
+            )
+        else:
+            install_hint = (
+                "请先关闭本程序，在终端执行以下命令，完成后重新打开程序：\n"
+                "pip install qwen-asr"
+            )
         message = QMessageBox(self.panel)
         message.setIcon(QMessageBox.Information)
         message.setWindowTitle("需要安装 Qwen3-ASR")
         message.setText("Qwen3-ASR 是可选模型，当前环境尚未安装。")
-        message.setInformativeText(
-            "请先关闭本程序，运行以下脚本，完成后重新打开程序：\n"
-            f"{script}\n\n"
-            "也可在 subtitle Conda 环境中执行：pip install qwen-asr"
-        )
+        message.setInformativeText(install_hint)
         message.exec()
-        self.panel.set_status("Qwen3-ASR 未安装，请运行安装脚本")
+        self.panel.set_status("Qwen3-ASR 未安装，请运行安装命令")
         return False
 
     def _on_started(self):
@@ -531,6 +540,7 @@ class SubtitleApp:
 
 
 def main():
+    _setup_console_io()
     app = SubtitleApp()
     code = app.run()
     # app.exec_() 正常返回（未被 aboutToQuit 的 os._exit 终止）时的兜底
@@ -538,3 +548,33 @@ def main():
         os._exit(code)
     except Exception:
         sys.exit(code)
+
+
+def _setup_console_io() -> None:
+    """让中文 print 在所有运行形态下都不崩。
+
+    两种会崩的情况：
+      1. PyInstaller --windowed/--noconsole：sys.stdout/stderr 为 None，
+         `print("中文")` 直接 AttributeError。
+      2. Windows GBK 控制台（cp936）：print 含中文/emoji 的诊断信息时
+         UnicodeEncodeError。
+    对策：stdout/stderr 为 None 时接到空 sink；Windows 控制台强制 UTF-8。
+    """
+    class _NullStream:
+        def write(self, _data):
+            pass
+        def flush(self):
+            pass
+        def isatty(self):
+            return False
+    if sys.stdout is None:
+        sys.stdout = _NullStream()  # type: ignore[assignment]
+    if sys.stderr is None:
+        sys.stderr = _NullStream()  # type: ignore[assignment]
+    # Windows 控制台默认 cp936，print 中文/emoji 会 UnicodeEncodeError。
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except Exception:
+            pass  # 非 TextIOWrapper（如上面的 _NullStream 或重定向）就不动

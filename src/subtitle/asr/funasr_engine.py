@@ -42,16 +42,19 @@ class FunAsrEngine(AsrEngine):
         self._diarization_enabled = bool(
             getattr(self.cfg, "enable_speaker_diarization", False)
         )
+        # 跨平台设备解析：cuda 不可用（macOS/CPU torch）时降级到 mps/cpu，避免硬崩。
+        from ._device import resolve_device
+        device = resolve_device(self.cfg.device)
         model_kwargs = dict(
             model=self.cfg.model,
-            device=self.cfg.device,
+            device=device,
             disable_update=getattr(self.cfg, "disable_update", True),
             hub="ms",  # Explicitly pin FunASR downloads to ModelScope.
         )
         if self._diarization_enabled:
             model_kwargs["spk_model"] = "cam++"
         print(
-            f"[funasr] 加载模型 {self.cfg.model} (device={self.cfg.device})"
+            f"[funasr] 加载模型 {self.cfg.model} (device={device})"
             + (" + spk_model=cam++（说话人区分）" if self._diarization_enabled else "")
             + "，首次会下载..."
         )

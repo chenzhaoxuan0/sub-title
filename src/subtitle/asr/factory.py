@@ -4,7 +4,45 @@
 """
 from __future__ import annotations
 
+import importlib.util
+
 from .base import AsrEngine, OnResult
+
+
+def _missing_dep(engine_type: str) -> "str | None":
+    """返回引擎缺少依赖时的中文提示；依赖齐全返回 None。
+
+    引擎的真实 import 发生在各自 load() 里（延迟到 worker 线程），但依赖缺失
+    若在那时才暴露，用户只看到一条 traceback。这里在工厂阶段用 find_spec 探测
+    （不真正 import，开销极低），给出可操作的安装提示。
+    """
+    if engine_type in {"funasr", "sensevoice", "funasr_nano"}:
+        # 三者都基于 funasr。注意：funasr 把 torch 列为 install_requires，但用户可能
+        # 手动卸了 torch 或用 --no-deps 装的 funasr——此时 `import funasr` 仍成功
+        # （torch 是延迟 import），但 `from funasr import AutoModel` 会在引擎 load 时
+        # 抛 ModuleNotFoundError。所以 funasr 和 torch 要分别探测，任一缺失都报。
+        if importlib.util.find_spec("funasr") is None:
+            return (
+                f"{engine_type} 引擎需要 funasr（含 torch 依赖）。请执行：pip install funasr"
+            )
+        if importlib.util.find_spec("torch") is None:
+            return (
+                f"{engine_type} 引擎依赖 torch 但当前未安装。"
+                "Windows GPU：pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121；"
+                "macOS/CPU：pip install torch torchaudio"
+            )
+        return None
+    if engine_type == "qwen3_asr":
+        if importlib.util.find_spec("qwen_asr") is None:
+            import platform
+            hint = (
+                "scripts\\install_qwen3_asr.bat"
+                if platform.system() == "Windows"
+                else "pip install qwen-asr"
+            )
+            return f"qwen3_asr 引擎未安装。请运行 {hint}（或直接 pip install qwen-asr）。"
+        return None
+    return None
 
 
 def create_engine(cfg, on_result: OnResult, source: str = "system") -> AsrEngine:
@@ -23,6 +61,11 @@ def create_engine(cfg, on_result: OnResult, source: str = "system") -> AsrEngine
             f"本 session 降级为 funasr（请在设置里切引擎或关闭说话人区分）"
         )
         engine_type = "funasr"
+
+    # 工厂阶段预检依赖：缺失就抛友好提示，而不是让 load() 在 worker 线程里崩成 traceback。
+    missing = _missing_dep(engine_type)
+    if missing:
+        raise ImportError(missing)
 
     if engine_type == "funasr":
         from .funasr_engine import FunAsrEngine

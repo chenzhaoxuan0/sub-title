@@ -1,39 +1,55 @@
-# ASR（本地引擎：FunASR / SenseVoice 都基于 funasr）
-funasr==1.3.29
-# Qwen3-ASR / faster-whisper 的模型快照统一从 ModelScope 下载。
-modelscope>=1.20.0
+# ============================================================
+# sub-title 运行时依赖
+#
+# 两种使用形态：
+#   【纯 API 模式】（推荐打包用）：只用阿里云引擎，无需本地模型。
+#       装下面【核心依赖】即可，体积小、跨平台稳。
+#   【本地模型模式】：还需额外装 funasr+torch（见下方「本地引擎」段），
+#       才能用 SenseVoice/FunASR/Fun-ASR-Nano/Qwen3-ASR。
+#       代码已做到：本地引擎依赖缺失时优雅报错，不崩。
+# ============================================================
 
-# Whisper 引擎（可选：多语言 + 翻译，CTranslate2 后端，不依赖 torch）
-# 未装时引擎选项里 faster_whisper 会置灰提示，不影响其他引擎。
-faster-whisper>=1.2.0
-
-# Qwen3-ASR（可选：新一代多语种/歌曲模型，依赖较重，按需安装）：
-# pip install qwen-asr
-
-# 硬件检测（首次启动按 CPU/RAM/GPU 推荐引擎）。funasr 的传递依赖，显式声明。
+# ---------- 核心依赖（纯 API 模式也需要）----------
+# 硬件检测（首次启动按 CPU/RAM/GPU 推荐引擎）。
 psutil
 
-# 阿里云 NLS 引擎（可选，仅用 API 模式时需要，未发 PyPI，从 GitHub 装）：
-#   pip install git+https://github.com/aliyun/alibabacloud-nls-python-sdk.git
-
-# 音频（soundcard 用于 Windows WASAPI loopback，捕获系统声音）
+# 音频（soundcard：Windows WASAPI loopback + macOS/Linux 输入；
+#       macOS 系统声音捕获需另装 BlackHole 虚拟声卡，见 README）。
 soundcard
 soundfile
 numpy
 librosa
+# resample.py 的重采样兜底用到 scipy（通常随 librosr 传递安装，这里显式声明更稳）。
+scipy
 
-# UI（PySide6 是 LGPL，允许 MIT 项目链接，无 GPL 传染问题；原 PyQt5 是 GPLv3）
+# UI（PySide6 是 LGPL，允许 MIT 项目链接，无 GPL 传染问题；原 PyQt5 是 GPLv3）。
 PySide6
 
 # 配置
 PyYAML
 
-# 跨平台用户目录（%APPDATA% / ~/Library/Application Support / ~/.config）
+# 跨平台用户目录（%APPDATA% / ~/Library/Application Support / ~/.config）。
 platformdirs
 
-# 操作系统级凭证保险箱（Windows Credential Manager / macOS Keychain / Linux Secret Service）
-# 用于存阿里云 AccessKey 等敏感信息，绝不放进 config.yaml
+# 操作系统级凭证保险箱（Windows Credential Manager / macOS Keychain / Linux Secret Service）。
+# 用于存阿里云 AccessKey 等敏感信息，绝不放进 config.yaml。
 keyring
+
+# ---------- 本地引擎依赖（可选；仅用 API 模式可不装）----------
+# SenseVoice / FunASR / Fun-ASR-Nano 都基于 funasr（其 PyPI 包会自动拉 torch）。
+# Qwen3-ASR / faster-whisper 的模型快照统一从 ModelScope 下载。
+funasr==1.3.29
+modelscope>=1.20.0
+
+# faster-whisper 引擎（可选：多语言 + 翻译，CTranslate2 后端，不依赖 torch）。
+# 未装时引擎选项里 faster_whisper 会置灰提示，不影响其他引擎。
+faster-whisper>=1.2.0
+
+# Qwen3-ASR（可选：新一代多语种/歌曲模型，依赖较重，按需安装）：
+#   pip install qwen-asr
+
+# 阿里云 NLS 引擎（可选，仅用 API 模式时需要，未发 PyPI，从 GitHub 装）：
+#   pip install git+https://github.com/aliyun/alibabacloud-nls-python-sdk.git
 
 # ============================================================
 # 重要：torch / torchaudio 不能用本文件直接装！
@@ -45,4 +61,6 @@ keyring
 # 装完验证：
 #   python -c "import torch; print(torch.cuda.is_available())"
 # 必须输出 True。
+# macOS / 纯 CPU 机器无需装 GPU 版，CPU torch 已含 MPS 后端（Apple Silicon 可用）。
 # ============================================================
+

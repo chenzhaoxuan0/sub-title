@@ -27,8 +27,9 @@ def detect(force: bool = False) -> dict[str, Any]:
     """检测本机硬件，返回信息字典。
 
     返回字段：
-      os, cpu_cores, ram_gb, has_cuda, cuda_vram_gb, gpu_name, is_apple_silicon
-    torch 不可用时 has_cuda=False，但 is_apple_silicon 仍按平台判断。
+      os, cpu_cores, ram_gb, has_cuda, cuda_vram_gb, gpu_name,
+      is_apple_silicon, has_mps
+    torch 不可用时 has_cuda/has_mps 均为 False，但 is_apple_silicon 仍按平台判断。
 
     结果在程序生命周期内缓存（硬件不会在运行时变化）。多次调用——如 app 启动
     推荐 + 设置页每张 EngineConfigCard 各调一次——只探测一次，避免反复 import
@@ -47,6 +48,7 @@ def detect(force: bool = False) -> dict[str, Any]:
         "gpu_name": "",
         "is_apple_silicon": (platform.system() == "Darwin"
                              and platform.machine() == "arm64"),
+        "has_mps": False,   # Apple Silicon Metal Performance Shaders（torch.backends.mps）
     }
     try:
         import torch
@@ -55,8 +57,18 @@ def detect(force: bool = False) -> dict[str, Any]:
             info["gpu_name"] = torch.cuda.get_device_name(0)
             info["cuda_vram_gb"] = round(
                 torch.cuda.get_device_properties(0).total_memory / (1024 ** 3), 1)
+        # macOS Apple Silicon：torch CPU 轮自带 MPS 后端，is_available() 可用即 M 系列。
+        mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+        if mps_backend is not None:
+            try:
+                if mps_backend.is_available():
+                    info["has_mps"] = True
+                    if not info["gpu_name"]:
+                        info["gpu_name"] = "Apple Silicon (MPS)"
+            except Exception:
+                pass
     except Exception:
-        pass  # torch 没装或检测失败，has_cuda 保持 False
+        pass  # torch 没装或检测失败，has_cuda/has_mps 保持 False
     _cached_info = info
     return info
 

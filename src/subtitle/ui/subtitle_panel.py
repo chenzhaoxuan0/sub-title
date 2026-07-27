@@ -850,7 +850,10 @@ class SubtitlePanel(QWidget):
 
     def wheelEvent(self, e):
         bar = self.view.verticalScrollBar()
-        steps = e.angleDelta().y() // 120
+        # macOS 触控板产生细粒度 momentum-scroll（angleDelta 常 <120，如 ±2/±8），
+        # 整除 120 会得到 0 导致滚不动。改成"有方向至少 1 步"，保证两平台都能滚。
+        delta_y = e.angleDelta().y()
+        steps = delta_y // 120 if abs(delta_y) >= 120 else (1 if delta_y > 0 else (-1 if delta_y < 0 else 0))
         bar.setValue(bar.value() - steps * bar.singleStep() * 4)
 
     def resizeEvent(self, e):

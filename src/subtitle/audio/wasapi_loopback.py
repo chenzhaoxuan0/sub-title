@@ -14,13 +14,25 @@ sounddevice/PortAudio 在 Windows 上不支持 loopback（输出设备 max_input
 """
 from __future__ import annotations
 
+import platform
 import queue
 import threading
-from ctypes import POINTER, cast, c_float
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+
+# 平台守卫：本模块仅在 Windows 上可用（依赖 windll / comtypes / pycaw / mmdevapi.dll）。
+# 非 Windows（macOS / Linux）在模块顶部就抛 ImportError，避免打包时被 PyInstaller 误扫描、
+# 或被任何 import 语句意外触发而崩在 `from ctypes import windll`（windll 仅 Windows 存在）。
+# 注意：当前此模块为死代码（未被 pipeline 引用），守卫仅为防御。
+if platform.system() != "Windows":
+    raise ImportError(
+        "wasapi_loopback 仅支持 Windows（依赖 WASAPI / comtypes / pycaw）；"
+        "macOS/Linux 请使用 audio.capture.SystemAudioCapture（基于 soundcard）。"
+    )
+
+from ctypes import POINTER, cast, c_float  # noqa: E402  （仅 Windows 可达）
 
 # WASAPI 常量（不依赖 pycaw 的枚举，直接写数值更稳）
 DEVICEID_LOOPBACK_RENDER = 0  # eRender

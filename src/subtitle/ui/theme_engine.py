@@ -17,11 +17,12 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-from ..paths import user_data_dir
+from ..paths import user_data_dir, resource_dir, default_font_family
 
 
 # 主题存储目录
-LEGACY_THEMES_DIR = Path(__file__).resolve().parents[2] / "themes"
+# 打包后内嵌的只读主题预设放在资源根下；用户主题在 user_data_dir 下（可写）。
+LEGACY_THEMES_DIR = resource_dir() / "themes"
 THEMES_DIR = user_data_dir() / "themes"
 # 回收站：软删除的自定义主题暂存这里，文件名加时间戳，可恢复
 TRASH_DIR = THEMES_DIR / ".trash"
@@ -76,7 +77,7 @@ class ThemeGeometry:
     toolbar_radius: int = 8          # 工具栏圆角
     btn_radius: int = 5              # 按钮圆角
     line_spacing: float = 1.4        # 行间距倍数
-    font_family: str = "Microsoft YaHei"
+    font_family: str = field(default_factory=default_font_family)
     font_size: int = 22
     font_weight: int = 400           # 400=normal, 700=bold
 

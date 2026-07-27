@@ -60,7 +60,13 @@ class SegmentedAsrTests(unittest.TestCase):
 
     def test_qwen3_4bit_forwards_quantization_to_runtime(self):
         qwen_model = MagicMock()
-        torch = SimpleNamespace(float32="float32", bfloat16="bfloat16")
+        # 本测试前提：CUDA 可用（device=cuda + 4bit 应当成功转发到运行时）。
+        # 给 mock torch 补齐 resolve_device/cuda_available 会探测的属性。
+        torch = SimpleNamespace(
+            float32="float32",
+            bfloat16="bfloat16",
+            cuda=SimpleNamespace(is_available=lambda: True),
+        )
         cfg = SimpleNamespace(
             qwen3_asr_model="Qwen/Qwen3-ASR-0.6B",
             qwen3_asr_device="cuda",
