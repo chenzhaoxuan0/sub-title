@@ -215,6 +215,37 @@ class CondaEnvInfo:
             out.append("faster-whisper")
         return out
 
+    def satisfies(self, engine_type: str) -> bool:
+        """此环境是否满足指定引擎的全部依赖（与 _ENGINES 的 deps 对齐）。
+
+        引擎卡片用它判断"conda 里能不能跑这个引擎"，避免只看单个依赖误判
+        （如 funasr 在但 torch 缺，仍不满足 funasr 引擎）。
+        """
+        info = _ENGINES.get(engine_type)
+        if info is None:
+            return True   # aliyun 等无依赖引擎恒满足
+        have = {
+            "torch": self.has_torch,
+            "funasr": self.has_funasr,
+            "qwen_asr": self.has_qwen_asr,
+            "faster_whisper": self.has_faster_whisper,
+        }
+        return all(have.get(d, False) for d in info.deps)
+
+
+def find_conda_env_for_engine(engine_type: str, envs: list) -> "CondaEnvInfo | None":
+    """在已扫描的 conda 环境列表里，找第一个满足该引擎依赖的环境。
+
+    优先选有 CUDA 的（GPU 加速）。都没有则返回 None。
+    envs 应是 scan_conda_envs() 的返回值。
+    """
+    candidates = [e for e in envs if isinstance(e, CondaEnvInfo) and not e.error and e.satisfies(engine_type)]
+    if not candidates:
+        return None
+    # 有 CUDA 的优先
+    with_cuda = [e for e in candidates if e.has_cuda]
+    return with_cuda[0] if with_cuda else candidates[0]
+
 
 # 子进程探测脚本：输出 JSON，含各依赖是否存在 + CUDA 信息。
 # 用 importlib.util.find_spec 探测（不真 import 重量级模块），仅 torch 在时才 import 查 CUDA。

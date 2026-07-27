@@ -23,7 +23,7 @@ from ..config import Config, AsrConfig
 from .. import credentials, hardware
 from ..asr._install import (
     all_local_engines, check_engine_deps, recommended_install_command,
-    scan_conda_envs, CondaEnvInfo,
+    scan_conda_envs, CondaEnvInfo, find_conda_env_for_engine,
 )
 from .theme_engine import (
     Theme, ThemeColors, ThemeGeometry, ThemeManager,
@@ -723,17 +723,15 @@ class SettingsDialog(QDialog):
         v.addWidget(hw_w)
 
         # ---- 各本地引擎卡片（容器，便于重新检测时清空重建）----
+        # 每个引擎卡片融合显示三态：exe 内部就绪 / conda 环境就绪 / 都没有。
         self._engine_cards_container = SettingCardGroup("本地引擎")
         v.addWidget(self._engine_cards_container)
-
-        # ---- 系统 conda 环境区块（发现用户已有的环境，引导用 run.bat 启动）----
-        self._conda_cards_container = SettingCardGroup("系统 conda 环境（可用于本地引擎）")
-        self._conda_scan_status = QLabel("正在扫描系统 conda 环境…")
-        self._conda_scan_status.setStyleSheet("color: #888; font-size: 11px; padding: 4px 0;")
-        self._conda_cards_container.add_card(
-            SettingCard("", "", self._conda_scan_status, vertical=True)
-        )
-        v.addWidget(self._conda_cards_container)
+        # conda 扫描状态（扫描中/完成提示），独立一行小字
+        self._conda_scan_status = QLabel()
+        self._conda_scan_status.setStyleSheet("color: #888; font-size: 11px; padding: 2px 0;")
+        v.addWidget(self._conda_scan_status)
+        # 缓存 conda 扫描结果，供引擎卡片构建时判断"conda 里有没有"
+        self._conda_envs: list[CondaEnvInfo] = []
         self._conda_worker: _CondaScanWorker | None = None
 
         # ---- 阿里云提示卡片 ----
@@ -783,7 +781,9 @@ class SettingsDialog(QDialog):
                 w.setParent(None)
                 w.deleteLater()
         for info in all_local_engines():
-            self._engine_cards_container.add_card(self._build_engine_install_card(info, has_cuda))
+            self._engine_cards_container.add_card(
+                self._build_engine_install_card(info, has_cuda, self._conda_envs)
+            )
 
         # conda 环境扫描（异步后台线程）。skip_conda=True 时不触发（构造时用）。
         if not skip_conda:
@@ -791,126 +791,91 @@ class SettingsDialog(QDialog):
 
     def _start_conda_scan(self) -> None:
         """启动后台线程扫描系统 conda 环境（避免子进程阻塞 UI）。"""
-        # 复用扫描状态提示（首次显示"扫描中"，重扫时也恢复）
         self._conda_scan_status.setText("正在扫描系统 conda 环境…")
-        # 清空旧 conda 卡片（保留状态提示卡片本身）
-        layout = self._conda_cards_container._cards_layout
-        # 跳过第 0 个（状态提示卡片），删除其余
-        while layout.count() > 1:
-            item = layout.takeAt(layout.count() - 1)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-                w.deleteLater()
         # 已有 worker 在跑就等它（最多 8s），避免并发扫描堆积子进程
         if self._conda_worker is not None and self._conda_worker.isRunning():
             self._conda_worker.wait(8000)
-        # 启动后台扫描线程（daemon，finished 自动清理引用）
         self._conda_worker = _CondaScanWorker(self)
         self._conda_worker.finished.connect(self._on_conda_scan_done)
         self._conda_worker.start()
 
     def _on_conda_scan_done(self, envs: object) -> None:
-        """后台扫描完成，渲染 conda 环境卡片。"""
-        # 清理 worker 引用（让 daemon 线程对象可被 GC）
+        """后台扫描完成：缓存结果 + 重建引擎卡片（让 conda 里的依赖反映到各卡片状态）。"""
         self._conda_worker = None
-        env_list: list[CondaEnvInfo] = envs if isinstance(envs, list) else []
-        layout = self._conda_cards_container._cards_layout
-
-        if not env_list:
+        self._conda_envs = envs if isinstance(envs, list) else []
+        local_envs = [e for e in self._conda_envs if e.has_any_local_engine]
+        if local_envs:
+            names = "、".join(e.name for e in local_envs)
             self._conda_scan_status.setText(
-                "未发现 conda 环境。如需本地引擎，请先安装 Anaconda/Miniconda，"
-                "再用「本地引擎」区的命令装依赖。"
+                f"已扫描系统环境：发现 {names} 含本地引擎依赖（下方各引擎卡片已更新状态）。"
             )
-            return
-
-        # 有发现的 env：隐藏状态提示，渲染各环境卡片
-        self._conda_scan_status.setText(
-            f"发现 {len(env_list)} 个 Python 环境（按住 Shift 选中命令框可全选复制）："
-        )
-        for env in env_list:
-            layout.addWidget(self._build_conda_env_card(env))
-
-    def _build_conda_env_card(self, env: CondaEnvInfo) -> SettingCard:
-        """构造单个 conda 环境的卡片：状态徽标 + 依赖详情 + 引导/复制按钮。"""
-        if env.error:
-            title = f"conda env: {env.name}　·　<span style='color:#888'>探测失败</span>"
-            content = f"<span style='color:#888;font-size:11px'>{env.error}</span>"
-            return SettingCard(title, content, None, vertical=True)
-
-        if env.has_any_local_engine:
-            engines = "、".join(env.ready_engines) if env.ready_engines else "部分本地引擎"
-            cuda_part = f"+ CUDA（{env.gpu_name}）" if env.has_cuda else "（无 CUDA，CPU 推理）"
-            status = f"✅ 含 {engines} {cuda_part}"
-            status_color = "#4caf50"
-            deps = []
-            if env.has_torch:
-                deps.append("torch")
-            if env.has_funasr:
-                deps.append("funasr")
-            if env.has_qwen_asr:
-                deps.append("qwen_asr")
-            if env.has_faster_whisper:
-                deps.append("faster_whisper")
-            content = (
-                f"<span style='color:#888;font-size:11px'>"
-                f"Python {env.python_version or '?'} · 依赖：{', '.join(deps)}<br>"
-                f"此环境可运行本地引擎。用以下命令启动开发版（非 exe）即可使用本地引擎 + GPU：</span>"
+        elif self._conda_envs:
+            self._conda_scan_status.setText(
+                "已扫描系统环境：未发现含本地引擎依赖的 conda 环境。可用下方命令安装。"
             )
-            # 复制启动命令（run.bat 等效）：conda activate <name> && python -m subtitle
-            launch_cmd = f"conda activate {env.name}\npython -m subtitle"
         else:
-            status = "⚪ 无本地引擎依赖"
-            status_color = "#888"
-            content = (
+            self._conda_scan_status.setText(
+                "未发现 conda 环境。如需本地引擎，请先安装 Anaconda/Miniconda。"
+            )
+        # 用最新 conda 结果重建引擎卡片
+        hw = hardware.detect()
+        has_cuda = bool(hw.get("has_cuda"))
+        layout = self._engine_cards_container._cards_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        for info in all_local_engines():
+            self._engine_cards_container.add_card(
+                self._build_engine_install_card(info, has_cuda, self._conda_envs)
+            )
+
+    def _build_engine_install_card(self, info, has_cuda: bool,
+                                   conda_envs: list | None = None) -> SettingCard:
+        """构造单个引擎卡片：三态融合显示。
+
+        三态优先级：
+          1. exe 内部就绪（find_spec 全有）→ ✅ 已就绪，可直接运行
+          2. conda 环境就绪（find_conda_env_for_engine 命中）→ ✅ conda 环境「X」已含，用 run.bat 启动可运行
+          3. 都没有 → ⚠️ 未安装，显示 pip 安装命令
+        """
+        conda_envs = conda_envs or []
+        exe_ready, missing = check_engine_deps(info.engine_type)
+        conda_env = find_conda_env_for_engine(info.engine_type, conda_envs)
+
+        # ---- 决定状态文案 + 命令 ----
+        if exe_ready:
+            status = "✅ 已就绪（可直接运行）"
+            status_color = "#4caf50"
+            detail = f"{info.description}<br><span style='color:#888;font-size:11px'>体积：{info.approx_size}</span>"
+            cmd = recommended_install_command(info.engine_type, has_cuda)
+            cmd_label = "📋 复制安装命令"
+        elif conda_env is not None:
+            cuda_part = f"+ CUDA（{conda_env.gpu_name}）" if conda_env.has_cuda else "（CPU 推理）"
+            status = f"✅ conda 环境「{conda_env.name}」已含依赖 {cuda_part}"
+            status_color = "#4caf50"
+            detail = (
+                f"{info.description}<br>"
                 f"<span style='color:#888;font-size:11px'>"
-                f"Python {env.python_version or '?'} · 此环境未装 torch/funasr，"
-                f"不影响纯 API 模式，可忽略。</span>"
+                f"Python {conda_env.python_version or '?'} · 此引擎依赖已在 conda 环境「{conda_env.name}」就绪。<br>"
+                f"exe 无法直接调用外部 conda 的库，请用以下命令启动开发版（含本地引擎 + GPU）：</span>"
             )
-            launch_cmd = ""
+            cmd = f"conda activate {conda_env.name}\npython -m subtitle"
+            cmd_label = "📋 复制启动命令"
+        else:
+            missing_str = "、".join(missing) if missing else "依赖"
+            status = f"⚠️ 未安装（缺少 {missing_str}）"
+            status_color = "#d94c4c"
+            detail = f"{info.description}<br><span style='color:#888;font-size:11px'>体积：{info.approx_size}</span>"
+            cmd = recommended_install_command(info.engine_type, has_cuda)
+            cmd_label = "📋 复制安装命令"
 
-        title = f"conda env: {env.name}　·　<span style='color:{status_color}'>{status}</span>"
+        title = f"{info.display_name}　·　<span style='color:{status_color}'>{status}</span>"
+        content = detail
 
-        # 命令框 + 复制按钮（仅有本地引擎依赖时显示）
-        if launch_cmd:
-            cmd_box = QTextEdit()
-            cmd_box.setPlainText(launch_cmd)
-            cmd_box.setReadOnly(True)
-            cmd_box.setFixedHeight(58)
-            cmd_box.setStyleSheet(
-                "QTextEdit { background: rgba(128,128,128,0.12);"
-                " border: 1px solid rgba(128,128,128,0.3); border-radius: 4px;"
-                " font-family: Consolas, 'Courier New', monospace; font-size: 12px; padding: 4px; }"
-            )
-            copy_btn = QPushButton("📋 复制启动命令")
-            copy_btn.setCursor(Qt.PointingHandCursor)
-            def _copy(_checked=False, _cmd: str = launch_cmd, _btn: QPushButton = copy_btn):
-                QApplication.clipboard().setText(_cmd)
-                QToolTip.showText(_btn.mapToGlobal(QPoint(0, -28)), "已复制到剪贴板", _btn)
-            copy_btn.clicked.connect(_copy)
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(6)
-            row.addWidget(cmd_box, 1)
-            row.addWidget(copy_btn)
-            cmd_w = QWidget()
-            cmd_w.setLayout(row)
-            return SettingCard(title, content, cmd_w, vertical=True)
-
-        return SettingCard(title, content, None, vertical=True)
-
-    def _build_engine_install_card(self, info, has_cuda: bool) -> SettingCard:
-        """构造单个引擎的安装卡片：状态徽标 + 用途 + 安装命令框 + 复制按钮。"""
-        ready, missing = check_engine_deps(info.engine_type)
-        status_text = "✅ 已就绪" if ready else f"⚠️ 未安装（缺少 {'、'.join(missing)}）"
-        status_color = "#4caf50" if ready else "#d94c4c"
-
-        # 卡片内容：引擎名 + 状态徽标（标题行）；用途 + 体积（说明行）
-        title = f"{info.display_name}　·　<span style='color:{status_color}'>{status_text}</span>"
-        content = f"{info.description}<br><span style='color:#888;font-size:11px'>体积：{info.approx_size}</span>"
-
-        # 命令文本框（只读、可选中）+ 复制按钮
-        cmd = recommended_install_command(info.engine_type, has_cuda)
+        # 命令文本框 + 复制按钮
         cmd_box = QTextEdit()
         cmd_box.setPlainText(cmd)
         cmd_box.setReadOnly(True)
@@ -920,14 +885,11 @@ class SettingsDialog(QDialog):
             " border: 1px solid rgba(128,128,128,0.3); border-radius: 4px;"
             " font-family: Consolas, 'Courier New', monospace; font-size: 12px; padding: 4px; }"
         )
-
-        copy_btn = QPushButton("📋 复制")
+        copy_btn = QPushButton(cmd_label)
         copy_btn.setCursor(Qt.PointingHandCursor)
-        # 闭包捕获当前命令（循环变量 info/cmd 需默认参数固定）
         def _copy(_checked=False, _cmd: str = cmd, _btn: QPushButton = copy_btn):
             QApplication.clipboard().setText(_cmd)
             QToolTip.showText(_btn.mapToGlobal(QPoint(0, -28)), "已复制到剪贴板", _btn)
-
         copy_btn.clicked.connect(_copy)
 
         row = QHBoxLayout()
@@ -938,7 +900,6 @@ class SettingsDialog(QDialog):
         cmd_w = QWidget()
         cmd_w.setLayout(row)
 
-        # 用 vertical 卡片：标题(含状态)在上，命令区在下占满宽度
         card = SettingCard(title, content, cmd_w, vertical=True)
         return card
 
