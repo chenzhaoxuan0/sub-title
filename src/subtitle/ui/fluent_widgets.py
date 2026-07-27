@@ -14,7 +14,42 @@ from PySide6.QtCore import Qt, Signal, QRectF, QSize
 from PySide6.QtGui import QPainter, QColor, QPalette
 from PySide6.QtWidgets import (
     QFrame, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSizePolicy,
+    QTabBar,
 )
+
+
+# ------------------------------------------------------------------
+# HorizontalTabBar：垂直标签页（West/East）下强制横向绘制文字
+# ------------------------------------------------------------------
+def make_tabbar_text_horizontal(tabbar: QTabBar) -> None:
+    """让垂直标签页（West/East）的 tabBar 横向绘制文字（中文不再逐字竖排）。
+
+    Qt 的 QTabBar 在垂直模式下会把文字逐字竖排，中文难以阅读。子类化 QTabBar
+    再 setTabBar 不可行——setTabBar 会破坏 West 模式的纵向堆叠布局（PySide6
+    已知行为）。这里用运行时替换 paintEvent 的方式：保留 Qt 原生的纵向堆叠
+    布局，只把每个 tab 内的文字绘制改成横向居中。
+
+    tabbar: QTabWidget.tabBar() 返回的实例。
+    """
+    from PySide6.QtWidgets import QStylePainter, QStyleOptionTab
+    from PySide6.QtGui import QPalette
+    import types
+
+    def custom_paint(self, event):
+        painter = QStylePainter(self)
+        opt = QStyleOptionTab()
+        for i in range(self.count()):
+            self.initStyleOption(opt, i)
+            rect = self.tabRect(i)
+            # 1) 画 tab 背景/边框/选中态（交给 style，保留 QSS 的圆角/竖条外观）
+            painter.drawControl(QStyle.CE_TabBarTabShape, opt)
+            # 2) 文字自己横向绘制（覆盖 style 默认的竖排文字）
+            pal = self.palette()
+            text_role = (QPalette.HighlightedText
+                         if opt.state & QStyle.State_Selected else QPalette.WindowText)
+            painter.drawItemText(rect, Qt.AlignCenter, pal, True, opt.text, text_role)
+
+    tabbar.paintEvent = types.MethodType(custom_paint, tabbar)
 
 
 # ------------------------------------------------------------------
@@ -65,7 +100,8 @@ class SettingCard(QFrame):
     右侧：控件（通过 add_widget 或构造时传入）
     """
 
-    def __init__(self, title: str, content: str = "", widget: QWidget | None = None, parent=None):
+    def __init__(self, title: str, content: str = "", widget: QWidget | None = None,
+                 parent=None, vertical: bool = False):
         super().__init__(parent)
         self.setObjectName("settingCard")
         # 之前用 setFixedHeight(64) 把卡片锁死成 64px 高，
@@ -74,10 +110,33 @@ class SettingCard(QFrame):
         # 内容需要更高的卡片（FlowLayout 多行 / 大型控件）允许自动撑高。
         self.setMinimumHeight(64)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._vertical = vertical
 
-        self._hbox = QHBoxLayout(self)
-        self._hbox.setContentsMargins(16, 8, 16, 8)
-        self._hbox.setSpacing(12)
+        if vertical:
+            # 垂直模式：标题/说明在上，控件在下占满整个卡片宽度。
+            # 用于参数密集的引擎卡片——避免「左标题+右控件」水平布局把
+            # QComboBox/QSpinBox 挤成右侧一窄条，窄窗口下出现横向滚动条。
+            self._main_layout = QVBoxLayout(self)
+            self._main_layout.setContentsMargins(16, 8, 16, 8)
+            self._main_layout.setSpacing(4)
+            self._title_label = QLabel(title)
+            self._title_label.setObjectName("cardTitle")
+            self._content_label = QLabel(content)
+            self._content_label.setObjectName("cardContent")
+            self._content_label.setWordWrap(True)
+            self._main_layout.addWidget(self._title_label)
+            if content:
+                self._main_layout.addWidget(self._content_label)
+            self._widget: QWidget | None = None
+            if widget is not None:
+                self.set_widget(widget)
+            self._main_layout.addStretch(1)
+            return
+
+        # 默认水平模式：左侧标题+说明，右侧控件
+        self._main_layout = QHBoxLayout(self)
+        self._main_layout.setContentsMargins(16, 8, 16, 8)
+        self._main_layout.setSpacing(12)
 
         # 左侧文字列
         self._text_col = QWidget()
@@ -91,7 +150,7 @@ class SettingCard(QFrame):
         text_layout.addWidget(self._title_label)
         text_layout.addWidget(self._content_label)
         text_layout.addStretch(1)
-        self._hbox.addWidget(self._text_col, 1)
+        self._main_layout.addWidget(self._text_col, 1)
 
         # 右侧控件
         self._widget: QWidget | None = None
@@ -99,12 +158,17 @@ class SettingCard(QFrame):
             self.set_widget(widget)
 
     def set_widget(self, widget: QWidget):
-        """设置右侧控件。"""
+        """设置右侧控件（水平模式）或下方控件（垂直模式）。"""
         if self._widget is not None:
             self._widget.setParent(None)
         self._widget = widget
         widget.setParent(self)
-        self._hbox.addWidget(widget)
+        if self._vertical:
+            # 垂直模式：控件占满卡片宽度（横向 Expanding），不被挤成窄条
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            self._main_layout.addWidget(widget)
+        else:
+            self._main_layout.addWidget(widget)
 
     def get_widget(self):
         return self._widget
@@ -248,15 +312,18 @@ def build_fluent_qss(colors) -> str:
         QTabBar::tab {{
             background-color: transparent;
             color: {content_color};
-            padding: 10px 20px;
-            margin-right: 2px;
+            padding: 10px 16px;
+            margin-bottom: 2px;
+            /* 垂直标签页（West）：左侧圆角，右侧贴合内容区 */
             border-top-left-radius: 8px;
-            border-top-right-radius: 8px;
+            border-bottom-left-radius: 8px;
             font-size: 13px;
+            min-width: 72px;
         }}
         QTabBar::tab:selected {{
             color: {text};
-            border-bottom: 2px solid {accent};
+            /* 选中态：左侧竖条指示（垂直标签页） */
+            border-left: 3px solid {accent};
         }}
         QTabBar::tab:hover:!selected {{
             color: {text};

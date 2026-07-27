@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QEvent
 from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QSpinBox,
@@ -27,6 +27,7 @@ from .theme_engine import (
 )
 from .fluent_widgets import (
     SettingCard, SettingCardGroup, ToggleSwitch, build_fluent_qss,
+    make_tabbar_text_horizontal,
 )
 from .trash_dialog import TrashDialog
 from .flow_layout import FlowLayout
@@ -75,8 +76,9 @@ class ColorButton(QPushButton):
 # ------------------------------------------------------------------
 # 辅助：把控件包进卡片的一行（标题+说明+控件），返回卡片
 # ------------------------------------------------------------------
-def _row(title: str, content: str, widget: QWidget) -> SettingCard:
-    return SettingCard(title, content, widget)
+def _row(title: str, content: str, widget: QWidget, vertical: bool = False) -> SettingCard:
+    """快捷构造一个 SettingCard。vertical=True 时控件占满卡片宽度（用于参数密集处）。"""
+    return SettingCard(title, content, widget, vertical=vertical)
 
 
 class EngineConfigCard(SettingCard):
@@ -98,17 +100,20 @@ class EngineConfigCard(SettingCard):
     _STACK_INDEX = {"funasr": 0, "sensevoice": 1, "faster_whisper": 2, "aliyun": 3}
 
     def __init__(self, title: str, content: str, parent=None):
-        super().__init__(title, content, None, parent=parent)
+        # vertical=True：引擎卡片标题/说明在上，引擎选择+参数面板在下占满宽度，
+        # 避免水平布局把 combo/stack 挤成右侧窄条。
+        super().__init__(title, content, None, parent=parent, vertical=True)
         self._fw_available = True
         container = QWidget()
         cl = QVBoxLayout(container)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(6)
 
-        # 引擎选择
+        # 引擎选择（占满卡片宽度，跟随卡片拉伸）
         self.engine_combo = QComboBox()
         for label, etype in self._ENGINE_ITEMS:
             self.engine_combo.addItem(label, etype)
+        self.engine_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
         cl.addWidget(self.engine_combo)
 
@@ -122,7 +127,7 @@ class EngineConfigCard(SettingCard):
 
         self.set_widget(container)
 
-    # ---- 各引擎参数面板 ----
+    # ---- 各引擎参数面板 ----（vertical 卡片：控件占满宽度，避免横向拥挤）
     def _build_funasr_panel(self):
         panel = QWidget()
         lp = QVBoxLayout(panel)
@@ -131,9 +136,9 @@ class EngineConfigCard(SettingCard):
         self.funasr_device_combo = QComboBox()
         self.funasr_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
         self.funasr_device_combo.addItem("CPU", "cpu")
-        lp.addWidget(_row("FunASR 设备", "推理设备，GPU 更快", self.funasr_device_combo))
+        lp.addWidget(_row("FunASR 设备", "推理设备，GPU 更快", self.funasr_device_combo, vertical=True))
         self.funasr_punc_check = ToggleSwitch()
-        lp.addWidget(_row("流式标点", "补标点以支持自动分行（首次下载~300-700MB）", self.funasr_punc_check))
+        lp.addWidget(_row("流式标点", "补标点以支持自动分行（首次下载~300-700MB）", self.funasr_punc_check, vertical=True))
         lp.addStretch(1)
         self.stack.addWidget(panel)
 
@@ -145,12 +150,12 @@ class EngineConfigCard(SettingCard):
         self.sv_device_combo = QComboBox()
         self.sv_device_combo.addItem("CPU（推荐，Mac/弱GPU）", "cpu")
         self.sv_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
-        lp.addWidget(_row("SenseVoice 设备", "推理设备", self.sv_device_combo))
+        lp.addWidget(_row("SenseVoice 设备", "推理设备", self.sv_device_combo, vertical=True))
         self.sv_segment_spin = QDoubleSpinBox()
         self.sv_segment_spin.setRange(0.5, 5.0)
         self.sv_segment_spin.setSingleStep(0.5)
         self.sv_segment_spin.setSuffix(" 秒")
-        lp.addWidget(_row("攒段时长", "越小延迟越低但易切词", self.sv_segment_spin))
+        lp.addWidget(_row("攒段时长", "越小延迟越低但易切词", self.sv_segment_spin, vertical=True))
         lp.addStretch(1)
         self.stack.addWidget(panel)
 
@@ -171,33 +176,33 @@ class EngineConfigCard(SettingCard):
                             ("small", "small（最快，弱机器）"),
                             ("distil-large-v3", "distil-large-v3（仅英文，最快）")]:
             self.fw_model_combo.addItem(label, name)
-        lp.addWidget(_row("Whisper 模型", "首用从 HF Hub 自动下载", self.fw_model_combo))
+        lp.addWidget(_row("Whisper 模型", "首用从 HF Hub 自动下载", self.fw_model_combo, vertical=True))
         self.fw_device_combo = QComboBox()
         self.fw_device_combo.addItem("auto（自动检测，推荐）", "auto")
         self.fw_device_combo.addItem("CUDA（NVIDIA GPU）", "cuda")
         self.fw_device_combo.addItem("CPU", "cpu")
-        lp.addWidget(_row("设备", "auto=有GPU用GPU否则CPU，不崩", self.fw_device_combo))
+        lp.addWidget(_row("设备", "auto=有GPU用GPU否则CPU，不崩", self.fw_device_combo, vertical=True))
         self.fw_compute_combo = QComboBox()
         for cv, label in [("auto", "auto（自动）"),
                           ("float16", "float16（GPU）"),
                           ("int8", "int8（CPU 最快）"),
                           ("int8_float16", "int8_float16（省显存）")]:
             self.fw_compute_combo.addItem(label, cv)
-        lp.addWidget(_row("计算精度", "auto=GPU用float16/CPU用int8", self.fw_compute_combo))
+        lp.addWidget(_row("计算精度", "auto=GPU用float16/CPU用int8", self.fw_compute_combo, vertical=True))
         self.fw_lang_combo = QComboBox()
         self.fw_lang_combo.addItem("中文", "zh")
         self.fw_lang_combo.addItem("自动检测", "auto")
         self.fw_lang_combo.addItem("英文", "en")
         self.fw_lang_combo.addItem("日文", "ja")
-        lp.addWidget(_row("语言", "影响识别准确度，中文建议指定", self.fw_lang_combo))
+        lp.addWidget(_row("语言", "影响识别准确度，中文建议指定", self.fw_lang_combo, vertical=True))
         self.fw_beam_spin = QSpinBox()
         self.fw_beam_spin.setRange(1, 10)
-        lp.addWidget(_row("beam_size", "1 最快（turbo 鲁棒），5 默认更准", self.fw_beam_spin))
+        lp.addWidget(_row("beam_size", "1 最快（turbo 鲁棒），5 默认更准", self.fw_beam_spin, vertical=True))
         self.fw_seg_spin = QDoubleSpinBox()
         self.fw_seg_spin.setRange(0.5, 5.0)
         self.fw_seg_spin.setSingleStep(0.5)
         self.fw_seg_spin.setSuffix(" 秒")
-        lp.addWidget(_row("攒段时长", "越小延迟越低但易切词", self.fw_seg_spin))
+        lp.addWidget(_row("攒段时长", "越小延迟越低但易切词", self.fw_seg_spin, vertical=True))
         if not self._fw_available:
             hint_fw = QLabel("⚠️ faster-whisper 未安装。多语言/翻译引擎需要它：\n"
                              "pip install faster-whisper（不依赖 torch）")
@@ -277,7 +282,9 @@ class SettingsDialog(QDialog):
         self._theme_mgr = get_theme_manager()
         self.setWindowTitle("全局设置")
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-        self.resize(640, 720)
+        # 加大默认尺寸 + 设最小尺寸：识别页内容多，原来 640x720 偏小需放大才能看全
+        self.resize(840, 780)
+        self.setMinimumSize(720, 600)
         self._init_ui()
         self._load_current_state()
         self._apply_dialog_theme()
@@ -302,6 +309,9 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         self.tabs = QTabWidget()
+        # 垂直标签页：左侧导航栏，右侧内容区。给内容更多纵向空间，
+        # 也让设置项更聚合（5 个标签纵向排列比顶部更紧凑）。
+        self.tabs.setTabPosition(QTabWidget.West)
         layout.addWidget(self.tabs, 1)
 
         self.tabs.addTab(self._build_recognition_tab(), "识别")
@@ -310,6 +320,10 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(self._build_skin_tab(), "皮肤")
         self.tabs.addTab(self._build_transcript_tab(), "文稿")
         self.tabs.currentChanged.connect(self._on_tab_changed)
+        # 让垂直标签的文字横向排列（Qt 默认在 West 模式下逐字竖排，中文难读）。
+        # 注意：必须在 addTab 之后调用（拿到已存在的 tabBar），且不能用 setTabBar
+        # 替换——那会破坏 West 的纵向堆叠布局。
+        make_tabbar_text_horizontal(self.tabs.tabBar())
 
         btns = QDialogButtonBox(QDialogButtonBox.Apply | QDialogButtonBox.Close)
         self._apply_btn = btns.button(QDialogButtonBox.Apply)
@@ -317,6 +331,35 @@ class SettingsDialog(QDialog):
         self._apply_btn.clicked.connect(self._on_apply)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
+
+        # 所有控件构建完后装滚轮防护（避免悬停滚动误改下拉框/数值框的值）
+        self._install_wheel_focus_guard()
+
+    # ---------- 滚轮误触防护 ----------
+    def _install_wheel_focus_guard(self):
+        """滚轮误触防护：QComboBox/QSpinBox 等控件只有在已聚焦时才响应滚轮。
+
+        Qt 默认行为是鼠标悬停在这些控件上滚动就会改值，在设置页滚动浏览时
+        极易误触。装事件过滤器：未聚焦时吃掉 Wheel 事件，聚焦后放行。
+        """
+        # PySide6 的 findChildren 不接受 tuple，逐类型查找后合并
+        sensitive_types = (QComboBox, QSpinBox, QDoubleSpinBox, QFontComboBox)
+        targets: list = []
+        for t in sensitive_types:
+            targets.extend(self.findChildren(t))
+        for w in targets:
+            w.installEventFilter(self)
+        # 也要处理焦点变化后让滚轮目标控件自动聚焦的体验：
+        # 鼠标点击控件即聚焦（Qt 默认），聚焦后滚轮就能改值，符合"先选中再改"直觉。
+
+    def eventFilter(self, obj, event):
+        """拦截 QComboBox/QSpinBox 等的滚轮事件：未聚焦时吃掉。"""
+        if event.type() == QEvent.Wheel and hasattr(obj, "hasFocus"):
+            if not obj.hasFocus():
+                # 未聚焦 → 阻止默认处理，滚轮不会改值（交给父滚动区滚动页面）
+                event.ignore()
+                return True
+        return super().eventFilter(obj, event)
 
     def _wrap_scroll(self, content: QWidget) -> QScrollArea:
         """把内容包进 Fluent 风格滚动区。"""
@@ -333,32 +376,7 @@ class SettingsDialog(QDialog):
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(8)
 
-        # 输入源 + 开始停止
-        self.device_combo = QComboBox()
-        for name, data in self.panel.get_devices():
-            self.device_combo.addItem(name, data)
-        v.addWidget(_row("输入源", "选择要捕获的系统音频输出设备（🔊 电脑声音）", self.device_combo))
-        # 电脑声音开关（与麦克风独立）
-        self.sys_enable_toggle = ToggleSwitch()
-        v.addWidget(_row("启用电脑声音", "🔊 回录系统声音输出（扬声器/耳机）", self.sys_enable_toggle))
-
-        # 麦克风输入（独立路径，与电脑声音分别采集、分别识别、在字幕里区分展示）
-        self.mic_combo = QComboBox()
-        for name, data in self.panel.get_mic_devices():
-            self.mic_combo.addItem(name, data)
-        v.addWidget(_row("麦克风", "🎤 选择麦克风输入设备（与电脑声音分开识别）", self.mic_combo))
-        self.mic_enable_toggle = ToggleSwitch()
-        v.addWidget(_row("启用麦克风", "🎤 识别麦克风语音（双开时占用双倍显存/内存）", self.mic_enable_toggle))
-        # 麦克风字幕颜色
-        self.mic_color_combo = QComboBox()
-        self.mic_color_combo.setEditable(True)
-        for name, val in (("蓝 #5aa9ff", "#5aa9ff"), ("绿 #5ad6a6", "#5ad6a6"),
-                          ("橙 #f0a830", "#f0a830"), ("粉 #f06292", "#f06292"),
-                          ("紫 #b06cf0", "#b06cf0"), ("红 #f06262", "#f06262")):
-            self.mic_color_combo.addItem(name, val)
-        v.addWidget(_row("麦克风字幕颜色", "🎤 麦克风字幕的文字颜色（电脑声音跟随主题色）", self.mic_color_combo))
-
-        # 开始/停止（放在一行卡片）
+        # 识别控制（开始/停止）—— 顶层独立卡片
         recog_card = SettingCard("识别控制", "开始或停止实时字幕识别", None)
         rb = QHBoxLayout()
         rb.setContentsMargins(0, 0, 0, 0)
@@ -373,29 +391,55 @@ class SettingsDialog(QDialog):
         recog_card.set_widget(wb)
         v.addWidget(recog_card)
 
-        # 两路独立的引擎配置卡片（电脑声音 / 麦克风各选各的引擎+参数）
+        # ---- 🔊 电脑声音分组：设备 + 开关 + 引擎 ----
+        g_sys = SettingCardGroup("🔊 电脑声音")
+        self.device_combo = QComboBox()
+        for name, data in self.panel.get_devices():
+            self.device_combo.addItem(name, data)
+        g_sys.add_card(_row("输入源", "系统音频输出设备（扬声器/耳机）", self.device_combo))
+        self.sys_enable_toggle = ToggleSwitch()
+        g_sys.add_card(_row("启用电脑声音", "回录系统声音输出", self.sys_enable_toggle))
         self.system_engine_card = EngineConfigCard(
-            "🔊 电脑声音引擎", "电脑声音（系统音频输出）使用的识别引擎及参数")
-        v.addWidget(self.system_engine_card)
-        self.mic_engine_card = EngineConfigCard(
-            "🎤 麦克风引擎", "麦克风使用的识别引擎及参数（可与电脑声音不同，按算力灵活调配）")
-        v.addWidget(self.mic_engine_card)
+            "电脑声音引擎", "电脑声音使用的识别引擎及参数（可与麦克风不同）")
+        g_sys.add_card(self.system_engine_card)
+        v.addWidget(g_sys)
 
-        # 阿里云凭证（全局唯一，两路共用——任一路选阿里云 API 都用这套凭证）
-        cred_card = SettingCard("阿里云凭证", "AccessKey ID/Secret/AppKey（两路共用，存系统保险箱）", None)
+        # ---- 🎤 麦克风分组：设备 + 开关 + 颜色 + 引擎 ----
+        g_mic = SettingCardGroup("🎤 麦克风")
+        self.mic_combo = QComboBox()
+        for name, data in self.panel.get_mic_devices():
+            self.mic_combo.addItem(name, data)
+        g_mic.add_card(_row("麦克风", "麦克风输入设备（与电脑声音分开识别）", self.mic_combo))
+        self.mic_enable_toggle = ToggleSwitch()
+        g_mic.add_card(_row("启用麦克风", "识别麦克风语音（双开占双倍显存/内存）", self.mic_enable_toggle))
+        self.mic_color_combo = QComboBox()
+        self.mic_color_combo.setEditable(True)
+        for name, val in (("蓝 #5aa9ff", "#5aa9ff"), ("绿 #5ad6a6", "#5ad6a6"),
+                          ("橙 #f0a830", "#f0a830"), ("粉 #f06292", "#f06292"),
+                          ("紫 #b06cf0", "#b06cf0"), ("红 #f06262", "#f06262")):
+            self.mic_color_combo.addItem(name, val)
+        g_mic.add_card(_row("字幕颜色", "麦克风字幕文字颜色（电脑声音跟随主题）", self.mic_color_combo))
+        self.mic_engine_card = EngineConfigCard(
+            "麦克风引擎", "麦克风使用的识别引擎及参数（按算力灵活调配）")
+        g_mic.add_card(self.mic_engine_card)
+        v.addWidget(g_mic)
+
+        # ---- 阿里云凭证（全局唯一，两路共用）----
+        cred_card = SettingCard(
+            "阿里云凭证", "AccessKey ID/Secret/AppKey（两路共用，存系统保险箱）", None)
         cp = QVBoxLayout()
         cp.setContentsMargins(0, 0, 0, 0)
         cp.setSpacing(4)
         self.aliyun_akid_edit = QLineEdit()
         self.aliyun_akid_edit.setPlaceholderText("AccessKey ID")
-        cp.addWidget(_row("AccessKey ID", "阿里云控制台获取", self.aliyun_akid_edit))
+        cp.addWidget(_row("AccessKey ID", "阿里云控制台获取", self.aliyun_akid_edit, vertical=True))
         self.aliyun_aksecret_edit = QLineEdit()
         self.aliyun_aksecret_edit.setPlaceholderText("AccessKey Secret")
         self.aliyun_aksecret_edit.setEchoMode(QLineEdit.Password)
-        cp.addWidget(_row("AccessKey Secret", "阿里云控制台获取", self.aliyun_aksecret_edit))
+        cp.addWidget(_row("AccessKey Secret", "阿里云控制台获取", self.aliyun_aksecret_edit, vertical=True))
         self.aliyun_appkey_edit = QLineEdit()
         self.aliyun_appkey_edit.setPlaceholderText("AppKey")
-        cp.addWidget(_row("AppKey", "智能语音交互项目 AppKey", self.aliyun_appkey_edit))
+        cp.addWidget(_row("AppKey", "智能语音交互项目 AppKey", self.aliyun_appkey_edit, vertical=True))
         cred_location = credentials.storage_location()
         cred_hint = QLabel(
             f"🔐 凭证存于系统保险箱（{cred_location}），不进 config.yaml。\n"
