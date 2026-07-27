@@ -4,45 +4,27 @@
 """
 from __future__ import annotations
 
-import importlib.util
-
 from .base import AsrEngine, OnResult
+from ._install import missing_dep_hint
 
 
 def _missing_dep(engine_type: str) -> "str | None":
     """返回引擎缺少依赖时的中文提示；依赖齐全返回 None。
 
+    依赖清单与平台/硬件感知的安装命令统一由 asr/_install.py 提供，
+    与「设置 → 引擎管理」标签页、各引擎 load() 报错文案保持一致。
+
     引擎的真实 import 发生在各自 load() 里（延迟到 worker 线程），但依赖缺失
     若在那时才暴露，用户只看到一条 traceback。这里在工厂阶段用 find_spec 探测
     （不真正 import，开销极低），给出可操作的安装提示。
     """
-    if engine_type in {"funasr", "sensevoice", "funasr_nano"}:
-        # 三者都基于 funasr。注意：funasr 把 torch 列为 install_requires，但用户可能
-        # 手动卸了 torch 或用 --no-deps 装的 funasr——此时 `import funasr` 仍成功
-        # （torch 是延迟 import），但 `from funasr import AutoModel` 会在引擎 load 时
-        # 抛 ModuleNotFoundError。所以 funasr 和 torch 要分别探测，任一缺失都报。
-        if importlib.util.find_spec("funasr") is None:
-            return (
-                f"{engine_type} 引擎需要 funasr（含 torch 依赖）。请执行：pip install funasr"
-            )
-        if importlib.util.find_spec("torch") is None:
-            return (
-                f"{engine_type} 引擎依赖 torch 但当前未安装。"
-                "Windows GPU：pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121；"
-                "macOS/CPU：pip install torch torchaudio"
-            )
-        return None
-    if engine_type == "qwen3_asr":
-        if importlib.util.find_spec("qwen_asr") is None:
-            import platform
-            hint = (
-                "scripts\\install_qwen3_asr.bat"
-                if platform.system() == "Windows"
-                else "pip install qwen-asr"
-            )
-            return f"qwen3_asr 引擎未安装。请运行 {hint}（或直接 pip install qwen-asr）。"
-        return None
-    return None
+    # has_cuda 影响 torch 安装命令（GPU 走 CUDA 索引），探测一次即可。
+    try:
+        from .. import hardware
+        has_cuda = bool(hardware.detect().get("has_cuda"))
+    except Exception:
+        has_cuda = False
+    return missing_dep_hint(engine_type, has_cuda=has_cuda)
 
 
 def create_engine(cfg, on_result: OnResult, source: str = "system") -> AsrEngine:
