@@ -10,6 +10,7 @@ torch 不可用时降级为纯 CPU 推断（has_cuda/is_apple_silicon 按平台�
 """
 from __future__ import annotations
 
+import os
 import platform
 from typing import Any
 
@@ -69,8 +70,66 @@ def detect(force: bool = False) -> dict[str, Any]:
                 pass
     except Exception:
         pass  # torch 没装或检测失败，has_cuda/has_mps 保持 False
+
+    # ---- 兜底：torch 不可用时（如纯 API exe 没打包 torch），用系统命令查 GPU ----
+    # 否则 exe 模式下即使机器有 N 卡也会显示"无 CUDA"——torch 缺失不该导致漏报真实硬件。
+    # 仅在 torch 没查出 CUDA 时才走系统命令（避免和 torch 结果冲突）。
+    if not info["has_cuda"]:
+        _detect_gpu_via_system(info)
     _cached_info = info
     return info
+
+
+def _detect_gpu_via_system(info: dict[str, Any]) -> None:
+    """torch 不可用时的 GPU 兜底检测：用 nvidia-smi / 系统命令查 NVIDIA GPU。
+
+    只查 NVIDIA CUDA GPU（与 torch.cuda 同语义）。查到则填 has_cuda/gpu_name/cuda_vram_gb。
+    非 N 卡（Intel/AMD 集显）不在此检测范围——它们本来也不能跑 CUDA 模型。
+    跨平台：nvidia-smi 在 Windows/Linux 都有（随驱动安装）；macOS 无 N 卡场景。
+    """
+    import shutil
+    import subprocess
+
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi is None:
+        # nvidia-smi 不在 PATH（常见于某些 Windows 安装），尝试常见绝对路径
+        import sys as _sys
+        candidates = []
+        if _sys.platform == "win32":
+            for env_var in ("ProgramFiles", "ProgramFiles(x86)"):
+                base = os.environ.get(env_var)
+                if base:
+                    candidates.append(os.path.join(
+                        base, "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe"))
+        for c in candidates:
+            if os.path.isfile(c):
+                nvidia_smi = c
+                break
+    if nvidia_smi is None:
+        return
+
+    try:
+        # 查 GPU 名 + 显存（字节）。--format=csv,noheader,nounits 给纯数值便于解析。
+        result = subprocess.run(
+            [nvidia_smi, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return
+        # 输出形如 "NVIDIA GeForce RTX 4060 Ti, 16384"
+        first_line = result.stdout.strip().splitlines()[0]
+        parts = [p.strip() for p in first_line.split(",")]
+        if len(parts) >= 2:
+            info["has_cuda"] = True
+            info["gpu_name"] = parts[0]
+            try:
+                # memory.total 单位是 MiB，转 GB
+                vram_mib = float(parts[1])
+                info["cuda_vram_gb"] = round(vram_mib / 1024, 1)
+            except (ValueError, IndexError):
+                pass
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        pass
 
 
 def recommend_engine(info: dict[str, Any]) -> tuple[str, dict[str, Any]]:
