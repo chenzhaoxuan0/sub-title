@@ -41,6 +41,11 @@ class ColorButton(QPushButton):
 
     def __init__(self, color: str = "#000000", parent=None):
         super().__init__(parent)
+        # 用唯一 objectName + #ID 选择器限定 stylesheet 只作用于自身。
+        # 若用泛化的 QPushButton 选择器，QColorDialog 以本按钮为 parent 时，
+        # 该样式会级联到对话框内的 OK/Cancel/Add to Custom Colors 等按钮，
+        # 选中深色时这些按钮变成深底、黑色文字看不见。
+        self.setObjectName("colorButton")
         self._color = color
         self.setFixedSize(60, 24)
         self.setCursor(Qt.PointingHandCursor)
@@ -49,12 +54,12 @@ class ColorButton(QPushButton):
 
     def _update_style(self):
         self.setStyleSheet(f"""
-            QPushButton {{
+            QPushButton#colorButton {{
                 background-color: {self._color};
                 border: 2px solid #888;
                 border-radius: 4px;
             }}
-            QPushButton:hover {{
+            QPushButton#colorButton:hover {{
                 border-color: #aaa;
             }}
         """)
