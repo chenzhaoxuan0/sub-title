@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QWidget
 
 from subtitle.config import Config
 from subtitle.skin.editor import LayerPanel, SkinEditorWindow
@@ -14,6 +14,7 @@ from subtitle.skin.editor_canvas import SkinCanvas
 from subtitle.skin.model import Layer, SkinDefinition
 from subtitle.skin.package import create_skin_directory
 from subtitle.skin.renderer import SkinRenderer
+from subtitle.ui.settings_dialog import SettingsDialog
 from subtitle.ui.subtitle_panel import SkinExtensionWindow, SubtitlePanel
 
 
@@ -159,6 +160,22 @@ class SkinEditorUiTests(unittest.TestCase):
             editor.close()
             panel._force_quit = True
             panel.close()
+
+    def test_settings_skin_editor_button_requests_editor(self):
+        config = Config()
+        panel = SubtitlePanel(config.ui)
+        dialog = SettingsDialog(config, panel)
+        requested = []
+        dialog.skin_editor_requested.connect(lambda: requested.append(True))
+
+        dialog.skin_editor_btn.click()
+        APP.processEvents()
+
+        self.assertEqual(requested, [True])
+        self.assertEqual(dialog.result(), QDialog.Accepted)
+        dialog.close()
+        panel._force_quit = True
+        panel.close()
 
 
 if __name__ == "__main__":

@@ -418,6 +418,7 @@ class SubtitleApp:
         # 关键：非模态。要在设置开着的时候能继续操作字幕窗口。
         dlg.setAttribute(Qt.WA_DeleteOnClose, False)
         dlg.finished.connect(self._on_settings_finished)
+        dlg.skin_editor_requested.connect(self._open_skin_editor)
         self._settings_dlg = dlg
         dlg.show()
         dlg.raise_()

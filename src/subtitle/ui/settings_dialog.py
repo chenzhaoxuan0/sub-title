@@ -467,6 +467,8 @@ class _CondaScanWorker(QThread):
 class SettingsDialog(QDialog):
     """设置对话框（Fluent 风格）。"""
 
+    skin_editor_requested = Signal()
+
     def __init__(self, cfg: Config, panel, parent=None):
         super().__init__(parent)
         self.cfg = cfg
@@ -1651,6 +1653,7 @@ class SettingsDialog(QDialog):
 
     def _on_open_skin_editor(self):
         """打开皮肤编辑器（由 app 层处理）。"""
+        self.skin_editor_requested.emit()
         self.accept()
 
     def _on_apply(self):
