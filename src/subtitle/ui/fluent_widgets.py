@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, QRectF, QSize
-from PySide6.QtGui import QPainter, QColor
+from PySide6.QtGui import QPainter, QColor, QFontMetrics
 from PySide6.QtWidgets import (
     QFrame, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSizePolicy,
     QStyle, QStyleOptionTab, QStylePainter, QTabBar,
@@ -21,8 +21,50 @@ from PySide6.QtWidgets import (
 # ------------------------------------------------------------------
 # HorizontalTextTabBar：垂直标签页（West/East）下强制横向绘制文字
 # ------------------------------------------------------------------
+# West/East 标签页下，Qt 默认按「竖排旋转文字」计算 tabSizeHint：尺寸与每个标签
+# 的文字长度正相关，导致文字越长的标签（如「引擎管理」）高度越大，各标签高度不齐。
+# 这里覆写 tabSizeHint，让所有标签共用统一尺寸（高度一致、宽度足以容纳最长文本）。
+_TAB_HORIZONTAL_PADDING = 32  # 左右内边距合计，与 QSS padding:10px 16px 对应
+_TAB_FIXED_HEIGHT = 40        # 统一高度（文字 + 上下 padding）
+
+
 class HorizontalTextTabBar(QTabBar):
     """在 West/East 标签栏中保留纵向导航，同时横向绘制每个标签文字。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 缓存最大文本宽度，避免每次 tabSizeHint 都遍历所有 tab。
+        self._cached_max_text_width = 0
+
+    def _recompute_max_text_width(self) -> None:
+        """遍历所有 tab 文本，取最宽者（用于统一 tab 宽度）。"""
+        fm = QFontMetrics(self.font())
+        max_w = 0
+        for i in range(self.count()):
+            text = self.tabText(i)
+            max_w = max(max_w, fm.horizontalAdvance(text))
+        self._cached_max_text_width = max_w
+
+    def tabInserted(self, index: int) -> None:
+        super().tabInserted(index)
+        self._recompute_max_text_width()
+        self.update()  # 缓存变化，触发重绘；尺寸在下次布局时由 tabSizeHint 返回
+
+    def tabRemoved(self, index: int) -> None:
+        super().tabRemoved(index)
+        self._recompute_max_text_width()
+        self.update()
+
+    def tabSizeHint(self, index: int) -> QSize:
+        """统一所有标签尺寸：高度固定、宽度按最长文本计算。
+
+        West 布局下 QSize 的 width 是标签的「水平宽度」（视觉宽度），
+        height 才是纵向高度——所有标签共用同一 height 即可等高。
+        """
+        if self._cached_max_text_width <= 0:
+            self._recompute_max_text_width()
+        width = self._cached_max_text_width + _TAB_HORIZONTAL_PADDING
+        return QSize(width, _TAB_FIXED_HEIGHT)
 
     def paintEvent(self, event) -> None:
         painter = QStylePainter(self)
@@ -311,6 +353,60 @@ def build_fluent_qss(colors) -> str:
             border-left: 3px solid {accent};
         }}
         QTabBar::tab:hover:!selected {{
+            color: {text};
+            background-color: {card_hover};
+        }}
+        /* 设置页可折叠侧边栏：QSplitter 分隔条 */
+        QSplitter::handle:horizontal {{
+            background-color: {border};
+            width: 2px;
+            margin: 4px 1px;
+            border-radius: 1px;
+        }}
+        QSplitter::handle:horizontal:hover {{
+            background-color: {accent};
+        }}
+        /* 侧边栏容器：无外框，透出对话框底色 */
+        #sidebarContainer {{
+            background: transparent;
+            border: none;
+        }}
+        /* 折叠/展开切换按钮：扁平小按钮 */
+        #sidebarToggle {{
+            background-color: {card_bg};
+            color: {text};
+            border: 1px solid {border};
+            border-radius: 6px;
+            padding: 2px;
+            font-size: 14px;
+            min-width: 24px;
+        }}
+        #sidebarToggle:hover {{
+            background-color: {card_hover};
+            border-color: {accent};
+        }}
+        /* 导航列表：去掉外框（嵌在 splitter 内不需要），保留底色区分内容区 */
+        QListWidget#settingsNav {{
+            background-color: {card_bg};
+            color: {content_color};
+            border: 1px solid {border};
+            border-radius: 8px;
+            padding: 6px 4px;
+            outline: 0;
+            font-size: 13px;
+        }}
+        /* 导航项：统一高度 + 内边距，选中态用左侧 accent 竖条（与原垂直标签页视觉一致） */
+        QListWidget#settingsNav::item {{
+            padding: 10px 12px;
+            border-left: 3px solid transparent;
+            border-radius: 4px;
+        }}
+        QListWidget#settingsNav::item:selected {{
+            color: {text};
+            background-color: {card_hover};
+            border-left: 3px solid {accent};
+        }}
+        QListWidget#settingsNav::item:hover:!selected {{
             color: {text};
             background-color: {card_hover};
         }}
