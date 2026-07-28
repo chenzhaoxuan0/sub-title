@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPixmap, QPolygonF, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
 from .model import ANIMATABLE_PROPERTIES, AnimationClip, Layer, SkinDefinition
@@ -19,6 +19,8 @@ class SkinCanvas(QWidget):
     edit_started = Signal()
     edit_finished = Signal()
     transform_changed = Signal(str, str, float)
+    zoom_changed = Signal(float)
+    rotation_pivot_selected = Signal(str, float, float)
 
     def __init__(self, skin: SkinDefinition, base_dir: Path, parent=None):
         super().__init__(parent)
@@ -39,6 +41,10 @@ class SkinCanvas(QWidget):
         self._start_values: dict[str, float] = {}
         self._start_angle = 0.0
         self._interaction_mapping: Optional[tuple[QRectF, float, QPointF]] = None
+        self.zoom = 1.0
+        self._pan_offset = QPointF()
+        self._pan_start = QPointF()
+        self._picking_rotation_pivot = False
         self.setMinimumSize(500, 260)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
@@ -50,6 +56,8 @@ class SkinCanvas(QWidget):
             self.renderer.base_dir = self.base_dir
         self.renderer.skin = skin
         self.selected_layer_id = None
+        self._picking_rotation_pivot = False
+        self.unsetCursor()
         self.update_state()
 
     def set_action(self, action: Optional[AnimationClip]) -> None:
@@ -74,6 +82,49 @@ class SkinCanvas(QWidget):
         self.viewport_width = width
         self.viewport_height = height
         self.update()
+
+    def set_zoom(self, value: float) -> None:
+        value = max(0.25, min(float(value), 8.0))
+        if abs(value - self.zoom) < 0.0001:
+            return
+        self.zoom = value
+        self.zoom_changed.emit(self.zoom)
+        self.update()
+
+    def zoom_in(self) -> None:
+        self.set_zoom(self.zoom * 1.25)
+
+    def zoom_out(self) -> None:
+        self.set_zoom(self.zoom / 1.25)
+
+    def reset_view(self) -> None:
+        self.zoom = 1.0
+        self._pan_offset = QPointF()
+        self.zoom_changed.emit(self.zoom)
+        self.update()
+
+    def begin_rotation_pivot_pick(self) -> None:
+        if self.selected_layer_id:
+            self._picking_rotation_pivot = True
+            self.setCursor(Qt.CrossCursor)
+
+    def _pick_rotation_pivot(self, point: QPointF) -> bool:
+        layer = self.skin.get_layer_by_id(self.selected_layer_id or "")
+        if layer is None:
+            return False
+        image_point = self.renderer.get_layer_image_point(
+            layer, self._to_scene(point), self.viewport_width, self.viewport_height
+        )
+        pixmap = self.renderer.get_layer_pixmap(layer)
+        if image_point is None or pixmap is None or pixmap.isNull():
+            return False
+        self.rotation_pivot_selected.emit(
+            layer.id, image_point.x() / pixmap.width(), image_point.y() / pixmap.height()
+        )
+        self._picking_rotation_pivot = False
+        self.unsetCursor()
+        self.update()
+        return True
 
     def select_layer(self, layer_id: Optional[str]) -> None:
         self.selected_layer_id = layer_id
@@ -121,12 +172,13 @@ class SkinCanvas(QWidget):
         bounds = self._scene_bounds()
         available_w = max(1.0, self.width() - margin * 2)
         available_h = max(1.0, self.height() - margin * 2)
-        scale = max(0.0001, min(available_w / bounds.width(), available_h / bounds.height()))
+        fit_scale = max(0.0001, min(available_w / bounds.width(), available_h / bounds.height()))
+        scale = fit_scale * self.zoom
         rendered_w = bounds.width() * scale
         rendered_h = bounds.height() * scale
         origin = QPointF(
-            (self.width() - rendered_w) / 2 - bounds.left() * scale,
-            (self.height() - rendered_h) / 2 - bounds.top() * scale,
+            (self.width() - rendered_w) / 2 - bounds.left() * scale + self._pan_offset.x(),
+            (self.height() - rendered_h) / 2 - bounds.top() * scale + self._pan_offset.y(),
         )
         return bounds, scale, origin
 
@@ -158,46 +210,49 @@ class SkinCanvas(QWidget):
     def paintEvent(self, event) -> None:
         del event
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        painter.fillRect(self.rect(), QColor("#11131a"))
-        preview = self._preview_rect()
-        _, display_scale, origin = self._scene_mapping()
-        painter.save()
-        painter.translate(origin)
-        painter.scale(display_scale, display_scale)
-        target = QRectF(0, 0, self.viewport_width, self.viewport_height).toRect()
-        if not self.background.isNull():
-            painter.drawPixmap(target, self.background)
-        else:
-            painter.fillRect(target, QColor("#242733"))
-        if self.grid_enabled:
-            painter.setPen(QPen(QColor(255, 255, 255, 22), 1 / display_scale))
-            step = max(2.0, self.grid_size * self._reference_scale())
-            position = 0.0
-            while position <= self.viewport_width:
-                painter.drawLine(QPointF(position, 0), QPointF(position, self.viewport_height))
-                position += step
-            position = 0.0
-            while position <= self.viewport_height:
-                painter.drawLine(QPointF(0, position), QPointF(self.viewport_width, position))
-                position += step
-        if self.guides_enabled:
-            painter.setPen(QPen(QColor(100, 190, 255, 90), 1 / display_scale, Qt.DashLine))
-            painter.drawLine(
-                QPointF(self.viewport_width / 2, 0),
-                QPointF(self.viewport_width / 2, self.viewport_height),
-            )
-            painter.drawLine(
-                QPointF(0, self.viewport_height / 2),
-                QPointF(self.viewport_width, self.viewport_height / 2),
-            )
-        self.renderer.render(painter, self.viewport_width, self.viewport_height)
-        painter.restore()
-        painter.setPen(QPen(QColor("#5c637a"), 1))
-        painter.drawRect(preview)
-        self._draw_selection(painter, preview)
-        painter.end()
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform)
+            painter.fillRect(self.rect(), QColor("#11131a"))
+            preview = self._preview_rect()
+            _, display_scale, origin = self._scene_mapping()
+            painter.save()
+            painter.translate(origin)
+            painter.scale(display_scale, display_scale)
+            target = QRectF(0, 0, self.viewport_width, self.viewport_height).toRect()
+            if not self.background.isNull():
+                painter.drawPixmap(target, self.background)
+            else:
+                painter.fillRect(target, QColor("#242733"))
+            if self.grid_enabled:
+                painter.setPen(QPen(QColor(255, 255, 255, 22), 1 / display_scale))
+                step = max(2.0, self.grid_size * self._reference_scale())
+                position = 0.0
+                while position <= self.viewport_width:
+                    painter.drawLine(QPointF(position, 0), QPointF(position, self.viewport_height))
+                    position += step
+                position = 0.0
+                while position <= self.viewport_height:
+                    painter.drawLine(QPointF(0, position), QPointF(self.viewport_width, position))
+                    position += step
+            if self.guides_enabled:
+                painter.setPen(QPen(QColor(100, 190, 255, 90), 1 / display_scale, Qt.DashLine))
+                painter.drawLine(
+                    QPointF(self.viewport_width / 2, 0),
+                    QPointF(self.viewport_width / 2, self.viewport_height),
+                )
+                painter.drawLine(
+                    QPointF(0, self.viewport_height / 2),
+                    QPointF(self.viewport_width, self.viewport_height / 2),
+                )
+            self.renderer.render(painter, self.viewport_width, self.viewport_height)
+            painter.restore()
+            painter.setPen(QPen(QColor("#5c637a"), 1))
+            painter.drawRect(preview)
+            self._draw_selection(painter, preview)
+        finally:
+            if painter.isActive():
+                painter.end()
 
     def _selection_polygon(self, preview: QRectF) -> QPolygonF:
         layer = self.skin.get_layer_by_id(self.selected_layer_id or "")
@@ -209,13 +264,20 @@ class SkinCanvas(QWidget):
         return QPolygonF([self._from_scene(point) for point in polygon])
 
     def _handles(self, preview: QRectF) -> dict[str, QPointF]:
+        layer = self.skin.get_layer_by_id(self.selected_layer_id or "")
+        if layer is None:
+            return {}
         polygon = self._selection_polygon(preview)
         if polygon.isEmpty():
             return {}
         bounds = polygon.boundingRect()
+        pivot = self.renderer.get_layer_pivot(
+            layer, self.viewport_width, self.viewport_height
+        )
         return {
             "scale": bounds.bottomRight(),
             "rotate": QPointF(bounds.center().x(), bounds.top() - 24),
+            "pivot": self._from_scene(pivot),
         }
 
     def _draw_selection(self, painter: QPainter, preview: QRectF) -> None:
@@ -235,12 +297,24 @@ class SkinCanvas(QWidget):
         bounds = polygon.boundingRect()
         painter.setPen(QPen(QColor("#56c8ff"), 1))
         painter.drawLine(bounds.center().x(), bounds.top(), handles["rotate"].x(), handles["rotate"].y())
+        painter.setPen(QPen(QColor("#ffcf4a"), 2))
+        painter.drawLine(handles["pivot"] + QPointF(-7, 0), handles["pivot"] + QPointF(7, 0))
+        painter.drawLine(handles["pivot"] + QPointF(0, -7), handles["pivot"] + QPointF(0, 7))
 
     @staticmethod
     def _near(point: QPointF, target: QPointF, radius: float = 10.0) -> bool:
         return (point - target).manhattanLength() <= radius * 1.5
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self._picking_rotation_pivot:
+            if event.button() == Qt.LeftButton:
+                self._pick_rotation_pivot(event.position())
+            return
+        if event.button() == Qt.MiddleButton:
+            self._mode = "pan"
+            self._press_pos = event.position()
+            self._pan_start = QPointF(self._pan_offset)
+            return
         if event.button() != Qt.LeftButton:
             return
         point = event.position()
@@ -283,7 +357,9 @@ class SkinCanvas(QWidget):
         self._start_values = {
             name: self._effective(layer, name) for name in ANIMATABLE_PROPERTIES
         }
-        center = self._selection_polygon(preview).boundingRect().center()
+        center = self._from_scene(self.renderer.get_layer_pivot(
+            layer, self.viewport_width, self.viewport_height
+        ))
         self._start_angle = math.degrees(
             math.atan2(point.y() - center.y(), point.x() - center.x())
         )
@@ -291,7 +367,13 @@ class SkinCanvas(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if not self._mode or not self.selected_layer_id:
+        if not self._mode:
+            return
+        if self._mode == "pan":
+            self._pan_offset = self._pan_start + event.position() - self._press_pos
+            self.update()
+            return
+        if not self.selected_layer_id:
             return
         layer = self.skin.get_layer_by_id(self.selected_layer_id)
         if layer is None or layer.locked:
@@ -323,7 +405,9 @@ class SkinCanvas(QWidget):
                 layer.id, "scale_y", max(0.01, self._start_values["scale_y"] * ratio)
             )
         elif self._mode == "rotate":
-            center = self._selection_polygon(preview).boundingRect().center()
+            center = self._from_scene(self.renderer.get_layer_pivot(
+                layer, self.viewport_width, self.viewport_height
+            ))
             angle = math.degrees(math.atan2(point.y() - center.y(), point.x() - center.x()))
             value = self._start_values["rotation"] + angle - self._start_angle
             if not (event.modifiers() & Qt.AltModifier):
@@ -334,10 +418,21 @@ class SkinCanvas(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         del event
         if self._mode:
+            was_edit = self._mode in {"move", "scale", "rotate"}
             self._mode = None
             self._interaction_mapping = None
-            self.edit_finished.emit()
+            if was_edit:
+                self.edit_finished.emit()
             self.update()
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        if not (event.modifiers() & Qt.ControlModifier):
+            event.ignore()
+            return
+        delta = event.angleDelta().y()
+        if delta:
+            self.set_zoom(self.zoom * (1.15 if delta > 0 else 1 / 1.15))
+        event.accept()
 
     def keyPressEvent(self, event) -> None:
         layer = self.skin.get_layer_by_id(self.selected_layer_id or "")

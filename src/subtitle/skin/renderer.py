@@ -24,6 +24,7 @@ class SkinRenderer:
         self._skin = skin
         self._base_dir = Path(base_dir)
         self._pixmap_cache: dict[str, QPixmap] = {}
+        self._stable_bounds_cache: dict[tuple[int, int], QRectF] = {}
         self._current_time = 0.0
         self._overrides: dict[str, dict[str, float]] = {}
         self._layer_times: dict[str, float] = {}
@@ -151,6 +152,42 @@ class SkinRenderer:
         transform.scale(scale_x, scale_y)
         return transform
 
+    def get_layer_pivot(self, layer: Layer, canvas_w: int, canvas_h: int) -> QPointF:
+        """Return the layer's rotation pivot in canvas coordinates."""
+        pixmap = self._get_pixmap(layer)
+        if pixmap is None or pixmap.isNull():
+            return self.resolve_layer_origin(layer, canvas_w, canvas_h)
+        origin = self.resolve_layer_origin(layer, canvas_w, canvas_h)
+        reference_scale = self._reference_scale(canvas_w, canvas_h)
+        return QPointF(
+            origin.x() + pixmap.width() * layer.anchor_x * self._value(layer, "scale_x") * reference_scale,
+            origin.y() + pixmap.height() * layer.anchor_y * self._value(layer, "scale_y") * reference_scale,
+        )
+
+    def get_layer_pixmap(self, layer: Layer) -> Optional[QPixmap]:
+        return self._get_pixmap(layer)
+
+    def get_layer_image_point(
+        self, layer: Layer, point: QPointF, canvas_w: int, canvas_h: int,
+    ) -> Optional[QPointF]:
+        """Map a canvas point to unscaled image coordinates for a layer."""
+        pixmap = self._get_pixmap(layer)
+        if pixmap is None or pixmap.isNull():
+            return None
+        inverse, invertible = self.get_layer_transform(
+            layer, canvas_w, canvas_h, pixmap
+        ).inverted()
+        if not invertible:
+            return None
+        local = inverse.map(point)
+        image_point = QPointF(
+            local.x() + pixmap.width() * layer.anchor_x,
+            local.y() + pixmap.height() * layer.anchor_y,
+        )
+        if not (0 <= image_point.x() <= pixmap.width() and 0 <= image_point.y() <= pixmap.height()):
+            return None
+        return image_point
+
     def get_layer_polygon(self, layer: Layer, canvas_w: int, canvas_h: int) -> QPolygonF:
         pixmap = self._get_pixmap(layer)
         if pixmap is None or pixmap.isNull():
@@ -197,6 +234,72 @@ class SkinRenderer:
             layer_bounds = polygon.boundingRect()
             bounds = layer_bounds if bounds is None else bounds.united(layer_bounds)
         return bounds or QRectF()
+
+    def get_stable_skin_bounds(self, canvas_w: int, canvas_h: int) -> QRectF:
+        """Return a fixed, center-based envelope for every action pose.
+
+        The extension window is a separate transparent top-level window.  Its
+        geometry must not track the current frame's left/top pixel, otherwise
+        a moving layer makes the whole extension appear to jump on screen.
+        """
+        cache_key = (canvas_w, canvas_h)
+        cached = self._stable_bounds_cache.get(cache_key)
+        if cached is not None:
+            return QRectF(cached)
+
+        original_time = self._current_time
+        original_overrides = self._overrides
+        original_layer_times = self._layer_times
+        bounds: Optional[QRectF] = None
+        try:
+            for overrides, layer_times in self._animation_sample_states():
+                self._overrides = overrides
+                self._layer_times = layer_times
+                for layer in self._skin.layers:
+                    if not layer.visible:
+                        continue
+                    polygon = self.get_layer_polygon(layer, canvas_w, canvas_h)
+                    if not polygon.isEmpty():
+                        layer_bounds = polygon.boundingRect()
+                        bounds = layer_bounds if bounds is None else bounds.united(layer_bounds)
+        finally:
+            self._current_time = original_time
+            self._overrides = original_overrides
+            self._layer_times = original_layer_times
+
+        if bounds is None:
+            return QRectF()
+        center = QPointF(canvas_w / 2, canvas_h / 2)
+        half_width = max(abs(bounds.left() - center.x()), abs(bounds.right() - center.x()))
+        half_height = max(abs(bounds.top() - center.y()), abs(bounds.bottom() - center.y()))
+        stable = QRectF(
+            center.x() - half_width, center.y() - half_height,
+            half_width * 2, half_height * 2,
+        )
+        self._stable_bounds_cache[cache_key] = QRectF(stable)
+        return stable
+
+    def _animation_sample_states(self):
+        """Yield the base state and representative states from every action."""
+        yield {}, {}
+        for action in self._skin.actions:
+            sample_times = {0.0, action.duration}
+            for properties in action.tracks.values():
+                for track in properties.values():
+                    sample_times.update(keyframe.time for keyframe in track.keyframes)
+            ordered_times = sorted(sample_times)
+            for start, end in zip(ordered_times, ordered_times[1:]):
+                # Rotation can expand its bounds between two endpoints.
+                sample_times.add((start + end) / 2)
+            for time_value in sorted(sample_times):
+                overrides = {
+                    layer_id: {
+                        name: track.get_value_at(time_value)
+                        for name, track in properties.items() if track.keyframes
+                    }
+                    for layer_id, properties in action.tracks.items()
+                }
+                yield overrides, {layer_id: time_value for layer_id in overrides}
 
     def layer_at(
         self,
@@ -256,3 +359,4 @@ class SkinRenderer:
 
     def invalidate_cache(self) -> None:
         self._pixmap_cache.clear()
+        self._stable_bounds_cache.clear()

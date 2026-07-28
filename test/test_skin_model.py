@@ -56,6 +56,26 @@ class SkinMigrationTests(unittest.TestCase):
         skin.triggers.append(Trigger(action_id="missing-action"))
         self.assertEqual(len(skin.validate()), 2)
 
+    def test_action_playback_settings_round_trip(self):
+        action = AnimationClip(
+            duration=1,
+            loop=True,
+            loop_count=3,
+            loop_forever=True,
+            ping_pong=True,
+            playback_duration=4,
+        )
+
+        restored = AnimationClip.from_dict(action.to_dict())
+
+        self.assertTrue(restored.loop)
+        self.assertEqual(restored.loop_count, 3)
+        self.assertTrue(restored.loop_forever)
+        self.assertTrue(restored.ping_pong)
+        self.assertEqual(restored.playback_duration, 4)
+        self.assertEqual(restored.effective_playback_duration, 4)
+        self.assertEqual(AnimationClip.from_dict({"duration": 2}).effective_playback_duration, 2)
+
     def test_text_trigger_matching(self):
         keyword = Trigger(trigger_type=TriggerType.KEYWORD, keyword="Cat")
         regex = Trigger(trigger_type=TriggerType.REGEX, pattern=r"tail\s+move")

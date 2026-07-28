@@ -9,9 +9,15 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QWidget
 
 from subtitle.config import Config
-from subtitle.skin.editor import LayerPanel, SkinEditorWindow
+from subtitle.skin.editor import (
+    ActionPanel, LayerPanel, PropertyPanel, SkinEditorWindow, TriggerPanel,
+)
 from subtitle.skin.editor_canvas import SkinCanvas
-from subtitle.skin.model import Layer, SkinDefinition
+from subtitle.skin.editor_timeline import ActionTimeline
+from subtitle.skin.model import (
+    AnimationClip, HorizontalPin, Keyframe, Layer, LayerPlane, SkinDefinition,
+    TriggerType, VerticalPin,
+)
 from subtitle.skin.package import create_skin_directory
 from subtitle.skin.renderer import SkinRenderer
 from subtitle.ui.settings_dialog import SettingsDialog
@@ -127,6 +133,42 @@ class SkinEditorUiTests(unittest.TestCase):
             extension.close()
             panel.close()
 
+    def test_extension_geometry_is_stable_across_action_positions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base_dir = Path(temporary)
+            image = QImage(40, 40, QImage.Format_ARGB32)
+            image.fill(QColor(255, 0, 0, 255))
+            image.save(str(base_dir / "cat.png"))
+            layer = Layer(name="cat", image_path="cat.png", x=-30, y=20)
+            action = AnimationClip(duration=1)
+            x_track = action.get_track(layer.id, "x")
+            x_track.add_keyframe(Keyframe(0, -30))
+            x_track.add_keyframe(Keyframe(1, 230))
+            renderer = SkinRenderer(
+                SkinDefinition(
+                    design_width=200, design_height=80,
+                    layers=[layer], actions=[action],
+                ),
+                base_dir,
+            )
+            panel = QWidget()
+            panel.resize(200, 80)
+            panel.container = QWidget(panel)
+            panel.container.setGeometry(0, 0, 200, 80)
+            panel.show()
+            extension = SkinExtensionWindow(panel)
+            extension.set_runtime(SimpleNamespace(renderer=renderer))
+            extension.sync_geometry()
+            first_geometry = extension.geometry()
+
+            renderer.set_runtime_state({layer.id: {"x": 230}}, {layer.id: 1})
+            extension.sync_geometry()
+
+            self.assertTrue(extension.isVisible())
+            self.assertEqual(extension.geometry(), first_geometry)
+            extension.close()
+            panel.close()
+
     def test_programmatic_window_resize_updates_preview_dimensions(self):
         panel = SubtitlePanel(Config().ui)
         preview_updates = []
@@ -175,6 +217,209 @@ class SkinEditorUiTests(unittest.TestCase):
         self.assertEqual(dialog.result(), QDialog.Accepted)
         dialog.close()
         panel._force_quit = True
+        panel.close()
+
+    def test_layer_placement_controls_keep_model_enums(self):
+        layer = Layer(name="cat")
+        properties = PropertyPanel()
+        properties.set_context(layer, None, 0)
+
+        properties.plane.setCurrentIndex(
+            properties.plane.findData(LayerPlane.BELOW_TEXT)
+        )
+        properties.pin_x.setCurrentIndex(properties.pin_x.findData(HorizontalPin.RIGHT))
+        properties.pin_y.setCurrentIndex(properties.pin_y.findData(VerticalPin.BOTTOM))
+
+        self.assertEqual(layer.plane, LayerPlane.BELOW_TEXT)
+        self.assertEqual(layer.pin_x, HorizontalPin.RIGHT)
+        self.assertEqual(layer.pin_y, VerticalPin.BOTTOM)
+        self.assertEqual(SkinDefinition(layers=[layer]).to_dict()["layers"][0]["plane"], "below_text")
+        properties.close()
+
+    def test_timeline_keyframe_click_switches_to_that_edit_time(self):
+        layer = Layer(name="tail")
+        action = AnimationClip(name="wag", duration=1)
+        action.get_track(layer.id, "rotation").add_keyframe(Keyframe(0.4, 15))
+        timeline = ActionTimeline()
+        timeline.resize(600, 200)
+        timeline.set_context(action, layer)
+        timeline.show()
+        APP.processEvents()
+        changed_times = []
+        timeline.time_changed.connect(changed_times.append)
+        point = timeline._keyframe_points().__next__()[2].toPoint()
+
+        QTest.mouseClick(timeline, Qt.LeftButton, pos=point)
+
+        self.assertAlmostEqual(timeline.current_time, 0.4)
+        self.assertAlmostEqual(changed_times[-1], 0.4)
+        self.assertEqual(timeline.current_property, "rotation")
+        timeline.close()
+
+    def test_action_pose_edit_preserves_base_layer_values(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Config()
+            config.skin.skins_dir = str(Path(temporary) / "skins")
+            panel = SubtitlePanel(config.ui)
+            panel.show()
+            editor = SkinEditorWindow(config, panel)
+            layer = Layer(name="tail", x=10, y=20)
+            editor.skin = SkinDefinition(layers=[layer])
+            editor._history = [editor.skin.to_dict()]
+            editor._history_index = 0
+            editor._saved_snapshot = editor.skin.to_dict()
+            editor._refresh_all()
+            action = AnimationClip(name="wag", duration=1)
+            editor.skin.actions.append(action)
+            editor._select_layer(layer.id)
+            editor._select_action(action.id)
+            editor._set_time(0.5)
+
+            editor._set_property(layer.id, "x", 30)
+
+            self.assertEqual(layer.x, 10)
+            self.assertEqual(layer.y, 20)
+            tracks = action.tracks[layer.id]
+            self.assertEqual([(key.time, key.value) for key in tracks["x"].keyframes], [(0, 10), (0.5, 30)])
+            self.assertEqual([(key.time, key.value) for key in tracks["y"].keyframes], [(0, 20), (0.5, 20)])
+            self.assertEqual(len(tracks), 6)
+            editor.close()
+            panel._force_quit = True
+            panel.close()
+
+    def test_canvas_zoom_scales_scene_and_reset_restores_fit(self):
+        canvas = SkinCanvas(SkinDefinition(design_width=200, design_height=80), Path("."))
+        canvas.resize(600, 400)
+        canvas.set_viewport_size(200, 80)
+        _, fit_scale, _ = canvas._scene_mapping()
+
+        canvas.set_zoom(2)
+        _, zoomed_scale, _ = canvas._scene_mapping()
+        canvas.reset_view()
+
+        self.assertAlmostEqual(zoomed_scale, fit_scale * 2)
+        self.assertEqual(canvas.zoom, 1)
+        canvas.close()
+
+    def test_canvas_rotation_uses_selected_pivot_without_moving_layer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base_dir = Path(temporary)
+            image = QImage(80, 80, QImage.Format_ARGB32)
+            image.fill(QColor(255, 0, 0, 255))
+            image.save(str(base_dir / "tail.png"))
+            layer = Layer(
+                name="tail", image_path="tail.png", x=60, y=20,
+                anchor_x=0.2, anchor_y=0.8,
+            )
+            canvas = SkinCanvas(
+                SkinDefinition(design_width=200, design_height=120, layers=[layer]),
+                base_dir,
+            )
+            canvas.resize(700, 440)
+            canvas.set_viewport_size(200, 120)
+            canvas.select_layer(layer.id)
+            canvas.show()
+            APP.processEvents()
+            changes = []
+            canvas.transform_changed.connect(
+                lambda layer_id, name, value: changes.append((layer_id, name, value))
+            )
+            rotate_handle = canvas._handles(canvas._preview_rect())["rotate"].toPoint()
+
+            QTest.mousePress(canvas, Qt.LeftButton, pos=rotate_handle)
+            QTest.mouseMove(canvas, rotate_handle + QPointF(35, 20).toPoint())
+            QTest.mouseRelease(canvas, Qt.LeftButton, pos=rotate_handle + QPointF(35, 20).toPoint())
+
+            self.assertEqual({name for _, name, _ in changes}, {"rotation"})
+            self.assertEqual((layer.x, layer.y), (60, 20))
+            canvas.close()
+
+    def test_canvas_can_pick_rotation_pivot_from_image(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base_dir = Path(temporary)
+            image = QImage(80, 80, QImage.Format_ARGB32)
+            image.fill(QColor(255, 0, 0, 255))
+            image.save(str(base_dir / "tail.png"))
+            layer = Layer(name="tail", image_path="tail.png", x=60, y=20)
+            canvas = SkinCanvas(
+                SkinDefinition(design_width=200, design_height=120, layers=[layer]),
+                base_dir,
+            )
+            canvas.resize(700, 440)
+            canvas.set_viewport_size(200, 120)
+            canvas.select_layer(layer.id)
+            canvas.show()
+            APP.processEvents()
+            picked = []
+            canvas.rotation_pivot_selected.connect(
+                lambda layer_id, x, y: picked.append((layer_id, x, y))
+            )
+            pivot = canvas._handles(canvas._preview_rect())["pivot"]
+
+            canvas.begin_rotation_pivot_pick()
+            self.assertTrue(canvas._pick_rotation_pivot(pivot))
+
+            self.assertEqual(picked[0][0], layer.id)
+            self.assertAlmostEqual(picked[0][1], 0.5)
+            self.assertAlmostEqual(picked[0][2], 0.5)
+            canvas.close()
+
+    def test_trigger_panel_add_and_type_change_are_serializable(self):
+        skin = SkinDefinition(actions=[AnimationClip(name="wag")])
+        panel = TriggerPanel(skin)
+        changes = []
+        panel.changed.connect(lambda: changes.append(True))
+
+        panel._add()
+        self.assertEqual(len(skin.triggers), 1)
+        self.assertEqual(changes, [True])
+        panel.type.setCurrentIndex(panel.type.findData(TriggerType.RANDOM))
+
+        self.assertEqual(skin.triggers[0].trigger_type, TriggerType.RANDOM)
+        self.assertEqual(skin.to_dict()["triggers"][0]["trigger_type"], "random")
+        panel.close()
+
+    def test_daily_action_creates_a_random_trigger(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Config()
+            config.skin.skins_dir = str(Path(temporary) / "skins")
+            panel = SubtitlePanel(config.ui)
+            editor = SkinEditorWindow(config, panel)
+            action = AnimationClip(name="wag")
+            editor.skin = SkinDefinition(actions=[action])
+            editor._history = [editor.skin.to_dict()]
+            editor._history_index = 0
+            editor._saved_snapshot = editor.skin.to_dict()
+            editor._refresh_all()
+
+            editor._make_daily_action(action.id)
+
+            self.assertEqual(len(editor.skin.triggers), 1)
+            trigger = editor.skin.triggers[0]
+            self.assertEqual(trigger.trigger_type, TriggerType.RANDOM)
+            self.assertEqual(trigger.action_id, action.id)
+            self.assertEqual((trigger.random_min, trigger.random_max), (8.0, 20.0))
+            editor.close()
+            panel._force_quit = True
+            panel.close()
+
+    def test_action_panel_saves_loop_and_playback_options(self):
+        action = AnimationClip(name="wag", duration=1)
+        panel = ActionPanel(SkinDefinition(actions=[action]))
+        panel.select(action.id)
+
+        panel.loop.setChecked(True)
+        panel.loop_count.setValue(3)
+        panel.loop_forever.setChecked(True)
+        panel.ping_pong.setChecked(True)
+        panel.playback_duration.setValue(4)
+
+        self.assertTrue(action.loop)
+        self.assertEqual(action.loop_count, 3)
+        self.assertTrue(action.loop_forever)
+        self.assertTrue(action.ping_pong)
+        self.assertEqual(action.playback_duration, 4)
+        self.assertFalse(panel.loop_count.isEnabled())
         panel.close()
 
 

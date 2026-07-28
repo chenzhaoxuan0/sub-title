@@ -100,10 +100,13 @@ class OverlayLayer(QWidget):
     def paintEvent(self, event):
         if self._renderer is not None:
             painter = QPainter(self)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setRenderHint(QPainter.SmoothPixmapTransform)
-            self._renderer.render(painter, self.width(), self.height(), self.plane)
-            painter.end()
+            try:
+                painter.setRenderHint(QPainter.Antialiasing)
+                painter.setRenderHint(QPainter.SmoothPixmapTransform)
+                self._renderer.render(painter, self.width(), self.height(), self.plane)
+            finally:
+                if painter.isActive():
+                    painter.end()
 
 
 class SkinExtensionWindow(QWidget):
@@ -141,7 +144,7 @@ class SkinExtensionWindow(QWidget):
         width = max(1, self.panel.container.width())
         height = max(1, self.panel.container.height())
         content = QRectF(0, 0, width, height)
-        bounds = self._renderer.get_skin_bounds(width, height)
+        bounds = self._renderer.get_stable_skin_bounds(width, height)
         if bounds.isEmpty() or content.contains(bounds):
             self.hide()
             return
@@ -181,13 +184,16 @@ class SkinExtensionWindow(QWidget):
         if self._renderer is None:
             return
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        outside = QRegion(self.rect()).subtracted(self._protected_ui_region)
-        painter.setClipRegion(outside)
-        painter.translate(self._paint_origin)
-        self._renderer.render(painter, self._canvas_width, self._canvas_height)
-        painter.end()
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform)
+            outside = QRegion(self.rect()).subtracted(self._protected_ui_region)
+            painter.setClipRegion(outside)
+            painter.translate(self._paint_origin)
+            self._renderer.render(painter, self._canvas_width, self._canvas_height)
+        finally:
+            if painter.isActive():
+                painter.end()
 
     def _layer_at_local(self, point: QPointF):
         if self._renderer is None or self._protected_ui_region.contains(point.toPoint()):

@@ -135,12 +135,18 @@ class ActionPlayer(QObject):
         for action_id, active in list(self._active.items()):
             clip = active.clip
             elapsed = max(0.0, now - active.started_at)
+            source_duration = clip.duration
+            forward_duration = clip.effective_playback_duration
+            cycle_duration = forward_duration * (2 if clip.ping_pong else 1)
             total_loops = clip.loop_count if clip.loop else 1
-            total_duration = clip.duration * max(1, total_loops)
-            if elapsed >= total_duration:
+            total_duration = cycle_duration * max(1, total_loops)
+            if not clip.loop_forever and elapsed >= total_duration:
                 finished.append(action_id)
                 continue
-            local_time = elapsed % clip.duration if clip.loop else min(elapsed, clip.duration)
+            phase = elapsed % cycle_duration if (clip.loop or clip.loop_forever) else elapsed
+            if clip.ping_pong and phase > forward_duration:
+                phase = cycle_duration - phase
+            local_time = min(source_duration, phase / forward_duration * source_duration)
             for layer_id, properties in clip.tracks.items():
                 layer_values = overrides.setdefault(layer_id, {})
                 for property_name, track in properties.items():

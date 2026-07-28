@@ -293,6 +293,9 @@ class AnimationClip:
     duration: float = 1.0
     loop: bool = False
     loop_count: int = 1
+    loop_forever: bool = False
+    ping_pong: bool = False
+    playback_duration: float = 0.0
     priority: int = 0
     interruptible: bool = True
     cooldown: float = 0.0
@@ -302,6 +305,11 @@ class AnimationClip:
     @property
     def target_layer_ids(self) -> set[str]:
         return {layer_id for layer_id, tracks in self.tracks.items() if tracks}
+
+    @property
+    def effective_playback_duration(self) -> float:
+        """Actual forward playback length; zero follows the keyframe timeline."""
+        return self.playback_duration if self.playback_duration > 0 else self.duration
 
     @property
     def keyframe_overrides(self) -> dict:
@@ -329,6 +337,9 @@ class AnimationClip:
             "duration": self.duration,
             "loop": self.loop,
             "loop_count": self.loop_count,
+            "loop_forever": self.loop_forever,
+            "ping_pong": self.ping_pong,
+            "playback_duration": self.playback_duration,
             "priority": self.priority,
             "interruptible": self.interruptible,
             "cooldown": self.cooldown,
@@ -347,6 +358,9 @@ class AnimationClip:
             duration=max(0.01, float(data.get("duration", 1.0))),
             loop=bool(data.get("loop", False)),
             loop_count=max(1, int(data.get("loop_count", 1))),
+            loop_forever=bool(data.get("loop_forever", False)),
+            ping_pong=bool(data.get("ping_pong", False)),
+            playback_duration=max(0.0, float(data.get("playback_duration", 0.0))),
             priority=int(data.get("priority", 0)),
             interruptible=bool(data.get("interruptible", True)),
             cooldown=max(0.0, float(data.get("cooldown", 0.0))),
@@ -428,7 +442,7 @@ class Trigger:
         return {
             "id": self.id,
             "name": self.name,
-            "trigger_type": self.trigger_type.value,
+            "trigger_type": TriggerType(self.trigger_type).value,
             "enabled": self.enabled,
             "action_id": self.action_id,
             "action_name": self.action_name,

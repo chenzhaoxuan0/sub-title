@@ -40,13 +40,18 @@ class ActionTimeline(QWidget):
         self.setMinimumHeight(self.ruler_height + len(ANIMATABLE_PROPERTIES) * self.row_height + 8)
         self.setFocusPolicy(Qt.StrongFocus)
 
-    def set_context(self, action: Optional[AnimationClip], layer: Optional[Layer]) -> None:
+    def set_context(
+        self,
+        action: Optional[AnimationClip],
+        layer: Optional[Layer],
+        time_value: float = 0.0,
+    ) -> None:
         self.action = action
         self.layer = layer
-        self.current_time = 0.0
+        duration = action.duration if action else 0.0
+        self.current_time = max(0.0, min(float(time_value), duration))
         self._selected_ids.clear()
         self._timer.setInterval(max(1, int(1000 / 30)))
-        self.time_changed.emit(0.0)
         self.update()
 
     def set_time(self, time_value: float) -> None:
@@ -110,41 +115,44 @@ class ActionTimeline(QWidget):
         del event
         self._update_scale()
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#181b24"))
-        painter.fillRect(0, 0, self.width(), self.ruler_height, QColor("#262a36"))
-        duration = self.action.duration if self.action else 1.0
-        painter.setPen(QColor("#9299aa"))
-        tick = 0.0
-        while tick <= duration + 0.0001:
-            x_value = self._x(tick)
-            painter.drawLine(QPointF(x_value, self.ruler_height - 7), QPointF(x_value, self.ruler_height))
-            painter.drawText(int(x_value + 3), 15, f"{tick:.1f}")
-            tick += 0.5
-        for row, property_name in enumerate(ANIMATABLE_PROPERTIES):
-            top = self.ruler_height + row * self.row_height
-            background = QColor("#252936") if property_name == self.current_property else QColor("#20232d")
-            painter.fillRect(0, top, self.width(), self.row_height, background)
-            painter.setPen(QColor("#c6cad5"))
-            painter.drawText(8, top + 17, property_name)
-            painter.setPen(QPen(QColor("#343947"), 1))
-            painter.drawLine(self.header_width, top + self.row_height, self.width(), top + self.row_height)
-        for property_name, keyframe, point in self._keyframe_points():
-            selected = id(keyframe) in self._selected_ids
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor("#ffcf4a") if selected else QColor("#8fbce8"))
-            painter.drawPolygon(QPolygonF([
-                point + QPointF(0, -6), point + QPointF(6, 0),
-                point + QPointF(0, 6), point + QPointF(-6, 0),
-            ]))
-        playhead = self._x(self.current_time)
-        painter.setPen(QPen(QColor("#ff5e69"), 2))
-        painter.drawLine(QPointF(playhead, 0), QPointF(playhead, self.height()))
-        if not self._selection_rect.isNull():
-            painter.setPen(QPen(QColor("#56c8ff"), 1, Qt.DashLine))
-            painter.setBrush(QColor(86, 200, 255, 30))
-            painter.drawRect(self._selection_rect.normalized())
-        painter.end()
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.fillRect(self.rect(), QColor("#181b24"))
+            painter.fillRect(0, 0, self.width(), self.ruler_height, QColor("#262a36"))
+            duration = self.action.duration if self.action else 1.0
+            painter.setPen(QColor("#9299aa"))
+            tick = 0.0
+            while tick <= duration + 0.0001:
+                x_value = self._x(tick)
+                painter.drawLine(QPointF(x_value, self.ruler_height - 7), QPointF(x_value, self.ruler_height))
+                painter.drawText(int(x_value + 3), 15, f"{tick:.1f}")
+                tick += 0.5
+            for row, property_name in enumerate(ANIMATABLE_PROPERTIES):
+                top = self.ruler_height + row * self.row_height
+                background = QColor("#252936") if property_name == self.current_property else QColor("#20232d")
+                painter.fillRect(0, top, self.width(), self.row_height, background)
+                painter.setPen(QColor("#c6cad5"))
+                painter.drawText(8, top + 17, property_name)
+                painter.setPen(QPen(QColor("#343947"), 1))
+                painter.drawLine(self.header_width, top + self.row_height, self.width(), top + self.row_height)
+            for property_name, keyframe, point in self._keyframe_points():
+                selected = id(keyframe) in self._selected_ids
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor("#ffcf4a") if selected else QColor("#8fbce8"))
+                painter.drawPolygon(QPolygonF([
+                    point + QPointF(0, -6), point + QPointF(6, 0),
+                    point + QPointF(0, 6), point + QPointF(-6, 0),
+                ]))
+            playhead = self._x(self.current_time)
+            painter.setPen(QPen(QColor("#ff5e69"), 2))
+            painter.drawLine(QPointF(playhead, 0), QPointF(playhead, self.height()))
+            if not self._selection_rect.isNull():
+                painter.setPen(QPen(QColor("#56c8ff"), 1, Qt.DashLine))
+                painter.setBrush(QColor(86, 200, 255, 30))
+                painter.drawRect(self._selection_rect.normalized())
+        finally:
+            if painter.isActive():
+                painter.end()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if self.action is None:
@@ -165,6 +173,9 @@ class ActionTimeline(QWidget):
             candidate_property, keyframe = nearest
             self.current_property = candidate_property
             self.property_selected.emit(candidate_property)
+            # A clicked diamond is the pose being edited.  Move the playhead
+            # before any drag so the canvas and property fields show that pose.
+            self.set_time(keyframe.time)
             if not (event.modifiers() & Qt.ControlModifier):
                 if id(keyframe) not in self._selected_ids:
                     self._selected_ids = {id(keyframe)}

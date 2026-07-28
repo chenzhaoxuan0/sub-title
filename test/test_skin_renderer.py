@@ -6,7 +6,9 @@ from PySide6.QtCore import QPointF
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
 
-from subtitle.skin.model import AssetType, HorizontalPin, Layer, SkinDefinition
+from subtitle.skin.model import (
+    AnimationClip, AssetType, HorizontalPin, Keyframe, Layer, SkinDefinition,
+)
 from subtitle.skin.renderer import SkinRenderer
 
 
@@ -72,6 +74,53 @@ class SkinRendererTests(unittest.TestCase):
             bounds = renderer.get_skin_bounds(100, 50)
             self.assertLess(bounds.left(), 0)
             self.assertLess(bounds.top(), 0)
+
+    def test_rotation_pivot_uses_layer_anchor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            image = QImage(100, 50, QImage.Format_ARGB32)
+            image.fill(QColor(255, 0, 0, 255))
+            image.save(str(Path(temporary) / "tail.png"))
+            layer = Layer(
+                image_path="tail.png", x=20, y=30, anchor_x=0.25, anchor_y=0.8,
+            )
+            renderer = SkinRenderer(
+                SkinDefinition(design_width=200, design_height=100, layers=[layer]),
+                Path(temporary),
+            )
+
+            pivot = renderer.get_layer_pivot(layer, 200, 100)
+
+            self.assertAlmostEqual(pivot.x(), 45)
+            self.assertAlmostEqual(pivot.y(), 70)
+
+    def test_stable_skin_bounds_are_centered_across_action_poses(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            image = QImage(40, 40, QImage.Format_ARGB32)
+            image.fill(QColor(255, 0, 0, 255))
+            image.save(str(Path(temporary) / "cat.png"))
+            layer = Layer(image_path="cat.png", x=-30, y=20)
+            action = AnimationClip(duration=1)
+            x_track = action.get_track(layer.id, "x")
+            x_track.add_keyframe(Keyframe(0, -30))
+            x_track.add_keyframe(Keyframe(1, 230))
+            renderer = SkinRenderer(
+                SkinDefinition(
+                    design_width=200, design_height=80,
+                    layers=[layer], actions=[action],
+                ),
+                Path(temporary),
+            )
+
+            stable = renderer.get_stable_skin_bounds(200, 80)
+            renderer.set_runtime_state({layer.id: {"x": -30}}, {layer.id: 0})
+            left_pose = renderer.get_skin_bounds(200, 80)
+            renderer.set_runtime_state({layer.id: {"x": 230}}, {layer.id: 1})
+            right_pose = renderer.get_skin_bounds(200, 80)
+
+            self.assertNotEqual(left_pose, right_pose)
+            self.assertAlmostEqual(stable.center().x(), 100)
+            self.assertAlmostEqual(stable.center().y(), 40)
+            self.assertGreater(stable.width(), left_pose.width())
 
 
 if __name__ == "__main__":

@@ -127,6 +127,9 @@ class ActionPanel(QWidget):
     add_requested = Signal()
     duplicate_requested = Signal()
     delete_requested = Signal()
+    play_requested = Signal(str)
+    stop_requested = Signal(str)
+    daily_requested = Signal(str)
 
     def __init__(self, skin: SkinDefinition, parent=None):
         super().__init__(parent)
@@ -141,6 +144,18 @@ class ActionPanel(QWidget):
             button = QPushButton(text)
             button.clicked.connect(signal.emit)
             buttons.addWidget(button)
+        play = QPushButton("播放")
+        play.setToolTip("在字幕窗口预览当前动作")
+        play.clicked.connect(self._play_selected)
+        buttons.addWidget(play)
+        stop = QPushButton("停止")
+        stop.setToolTip("停止当前动作预览")
+        stop.clicked.connect(self._stop_selected)
+        buttons.addWidget(stop)
+        daily = QPushButton("日常")
+        daily.setToolTip("创建随机触发的日常动作，可在事件页调整间隔")
+        daily.clicked.connect(self._make_daily)
+        buttons.addWidget(daily)
         layout.addLayout(buttons)
         self.list = QListWidget()
         self.list.currentItemChanged.connect(self._selected)
@@ -156,6 +171,14 @@ class ActionPanel(QWidget):
         self.loop = QCheckBox("循环")
         self.loop_count = QSpinBox()
         self.loop_count.setRange(1, 999)
+        self.loop_forever = QCheckBox("无限循环")
+        self.ping_pong = QCheckBox("往复播放")
+        self.playback_duration = QDoubleSpinBox()
+        self.playback_duration.setRange(0, 3600)
+        self.playback_duration.setDecimals(2)
+        self.playback_duration.setSuffix(" s")
+        self.playback_duration.setSpecialValueText("跟随动作时长")
+        self.playback_duration.setToolTip("0 表示跟随动作时长；设为其他值可慢放或快放，关键帧时间不变")
         self.interruptible = QCheckBox("允许高优先级动作打断")
         self.cooldown = QDoubleSpinBox()
         self.cooldown.setRange(0, 3600)
@@ -164,15 +187,23 @@ class ActionPanel(QWidget):
         form.addRow("优先级", self.priority)
         form.addRow(self.loop)
         form.addRow("循环次数", self.loop_count)
+        form.addRow(self.loop_forever)
+        form.addRow(self.ping_pong)
+        form.addRow("播放时长", self.playback_duration)
         form.addRow(self.interruptible)
         form.addRow("动作冷却", self.cooldown)
         layout.addWidget(group)
-        for widget in (self.duration, self.priority, self.loop, self.loop_count,
-                       self.interruptible, self.cooldown):
+        for widget in (
+            self.duration, self.priority, self.loop, self.loop_count,
+            self.loop_forever, self.ping_pong, self.playback_duration,
+            self.interruptible, self.cooldown,
+        ):
             if isinstance(widget, QCheckBox):
                 widget.toggled.connect(self._save)
             else:
                 widget.valueChanged.connect(self._save)
+        self.loop.toggled.connect(self._update_loop_controls)
+        self.loop_forever.toggled.connect(self._update_loop_controls)
         self.refresh()
 
     def set_skin(self, skin: SkinDefinition) -> None:
@@ -230,17 +261,32 @@ class ActionPanel(QWidget):
         action = self.selected_action()
         self._refreshing = True
         enabled = action is not None
-        for widget in (self.duration, self.priority, self.loop, self.loop_count,
-                       self.interruptible, self.cooldown):
+        for widget in (
+            self.duration, self.priority, self.loop, self.loop_count,
+            self.loop_forever, self.ping_pong, self.playback_duration,
+            self.interruptible, self.cooldown,
+        ):
             widget.setEnabled(enabled)
         if action:
             self.duration.setValue(action.duration)
             self.priority.setValue(action.priority)
             self.loop.setChecked(action.loop)
             self.loop_count.setValue(action.loop_count)
+            self.loop_forever.setChecked(action.loop_forever)
+            self.ping_pong.setChecked(action.ping_pong)
+            self.playback_duration.setValue(action.playback_duration)
             self.interruptible.setChecked(action.interruptible)
             self.cooldown.setValue(action.cooldown)
         self._refreshing = False
+        self._update_loop_controls()
+
+    def _update_loop_controls(self, *args) -> None:
+        del args
+        self.loop_count.setEnabled(
+            self.selected_action() is not None
+            and self.loop.isChecked()
+            and not self.loop_forever.isChecked()
+        )
 
     def _save(self, *args) -> None:
         del args
@@ -252,9 +298,27 @@ class ActionPanel(QWidget):
             action.priority = self.priority.value()
             action.loop = self.loop.isChecked()
             action.loop_count = self.loop_count.value()
+            action.loop_forever = self.loop_forever.isChecked()
+            action.ping_pong = self.ping_pong.isChecked()
+            action.playback_duration = self.playback_duration.value()
             action.interruptible = self.interruptible.isChecked()
             action.cooldown = self.cooldown.value()
             self.changed.emit()
+
+    def _play_selected(self) -> None:
+        action = self.selected_action()
+        if action:
+            self.play_requested.emit(action.id)
+
+    def _stop_selected(self) -> None:
+        action = self.selected_action()
+        if action:
+            self.stop_requested.emit(action.id)
+
+    def _make_daily(self) -> None:
+        action = self.selected_action()
+        if action:
+            self.daily_requested.emit(action.id)
 
 
 class TriggerPanel(QWidget):
@@ -368,24 +432,26 @@ class TriggerPanel(QWidget):
 
     def refresh(self, selected_id: str = "") -> None:
         self._refreshing = True
-        self.list.clear()
-        for trigger in self.skin.triggers:
-            item = QListWidgetItem(f"{'✓' if trigger.enabled else '✗'} {trigger.name}")
-            item.setData(Qt.UserRole, trigger.id)
-            item.setFlags(item.flags() | Qt.ItemIsEditable)
-            self.list.addItem(item)
-            if trigger.id == selected_id:
-                self.list.setCurrentItem(item)
-        self.action.clear()
-        self.action.addItem("（无动作）", "")
-        for action in self.skin.actions:
-            self.action.addItem(action.name, action.id)
-        self.layer.clear()
-        self.layer.addItem("（任意图层）", "")
-        for layer in self.skin.layers:
-            self.layer.addItem(layer.name, layer.id)
-        self._refreshing = False
-        self._load_form()
+        try:
+            self.list.clear()
+            for trigger in self.skin.triggers:
+                item = QListWidgetItem(f"{'✓' if trigger.enabled else '✗'} {trigger.name}")
+                item.setData(Qt.UserRole, trigger.id)
+                item.setFlags(item.flags() | Qt.ItemIsEditable)
+                self.list.addItem(item)
+                if trigger.id == selected_id:
+                    self.list.setCurrentItem(item)
+            self.action.clear()
+            self.action.addItem("（无动作）", "")
+            for action in self.skin.actions:
+                self.action.addItem(action.name, action.id)
+            self.layer.clear()
+            self.layer.addItem("（任意图层）", "")
+            for layer in self.skin.layers:
+                self.layer.addItem(layer.name, layer.id)
+            self._load_form()
+        finally:
+            self._refreshing = False
 
     def _add(self) -> None:
         trigger = Trigger(name=f"触发器 {len(self.skin.triggers) + 1}")
@@ -424,32 +490,35 @@ class TriggerPanel(QWidget):
 
     def _load_form(self) -> None:
         trigger = self.selected_trigger()
+        was_refreshing = self._refreshing
         self._refreshing = True
-        for widget in self.findChildren(QWidget):
-            if widget not in (self.list,):
-                widget.setEnabled(trigger is not None or isinstance(widget, QPushButton))
-        if trigger:
-            self._select_data(self.type, trigger.trigger_type)
-            self._select_data(self.action, trigger.action_id)
-            self.enabled.setChecked(trigger.enabled)
-            self.interval.setValue(trigger.interval)
-            self.delay.setValue(trigger.delay)
-            self.random_min.setValue(trigger.random_min)
-            self.random_max.setValue(trigger.random_max)
-            self.idle.setValue(trigger.idle_timeout)
-            self.keyword.setCurrentText(trigger.keyword)
-            self.pattern.setCurrentText(trigger.pattern)
-            self.case_sensitive.setChecked(trigger.case_sensitive)
-            self.volume.setValue(trigger.volume_threshold)
-            self.hold.setValue(trigger.hold_seconds)
-            self._select_data(self.layer, trigger.target_layer_id)
-            self.mouse_button.setCurrentText(trigger.mouse_button)
-            self.cooldown.setValue(trigger.cooldown)
-            self.allow_retrigger.setChecked(trigger.allow_retrigger)
-            self.probability.setValue(trigger.probability)
-            self.max_fires.setValue(trigger.max_fires)
-            self.priority.setValue(-101 if trigger.priority_override is None else trigger.priority_override)
-        self._refreshing = False
+        try:
+            for widget in self.findChildren(QWidget):
+                if widget not in (self.list,):
+                    widget.setEnabled(trigger is not None or isinstance(widget, QPushButton))
+            if trigger:
+                self._select_data(self.type, trigger.trigger_type)
+                self._select_data(self.action, trigger.action_id)
+                self.enabled.setChecked(trigger.enabled)
+                self.interval.setValue(trigger.interval)
+                self.delay.setValue(trigger.delay)
+                self.random_min.setValue(trigger.random_min)
+                self.random_max.setValue(trigger.random_max)
+                self.idle.setValue(trigger.idle_timeout)
+                self.keyword.setCurrentText(trigger.keyword)
+                self.pattern.setCurrentText(trigger.pattern)
+                self.case_sensitive.setChecked(trigger.case_sensitive)
+                self.volume.setValue(trigger.volume_threshold)
+                self.hold.setValue(trigger.hold_seconds)
+                self._select_data(self.layer, trigger.target_layer_id)
+                self.mouse_button.setCurrentText(trigger.mouse_button)
+                self.cooldown.setValue(trigger.cooldown)
+                self.allow_retrigger.setChecked(trigger.allow_retrigger)
+                self.probability.setValue(trigger.probability)
+                self.max_fires.setValue(trigger.max_fires)
+                self.priority.setValue(-101 if trigger.priority_override is None else trigger.priority_override)
+        finally:
+            self._refreshing = was_refreshing
 
     def _save_form(self, *args) -> None:
         del args
@@ -458,7 +527,7 @@ class TriggerPanel(QWidget):
         trigger = self.selected_trigger()
         if not trigger:
             return
-        trigger.trigger_type = self.type.currentData()
+        trigger.trigger_type = TriggerType(self.type.currentData())
         trigger.action_id = self.action.currentData() or ""
         trigger.enabled = self.enabled.isChecked()
         trigger.interval = self.interval.value()
@@ -486,6 +555,7 @@ class PropertyPanel(QWidget):
     structure_changed = Signal()
     add_keyframe_requested = Signal(str, object)
     remove_keyframe_requested = Signal(str)
+    rotation_pivot_pick_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -495,6 +565,7 @@ class PropertyPanel(QWidget):
         self._refreshing = False
         layout = QVBoxLayout(self)
         self.title = QLabel("未选择图层")
+        self.title.setWordWrap(True)
         layout.addWidget(self.title)
         general = QGroupBox("图层")
         form = QFormLayout(general)
@@ -517,12 +588,28 @@ class PropertyPanel(QWidget):
         self.sequence_fps.setRange(0.1, 120)
         self.sequence_fps.setSuffix(" fps")
         self.sequence_loop = QCheckBox("序列帧循环")
+        self.pivot_x = QDoubleSpinBox()
+        self.pivot_x.setRange(0, 100)
+        self.pivot_x.setSingleStep(1)
+        self.pivot_x.setSuffix(" %")
+        self.pivot_y = QDoubleSpinBox()
+        self.pivot_y.setRange(0, 100)
+        self.pivot_y.setSingleStep(1)
+        self.pivot_y.setSuffix(" %")
+        self.pivot_pick = QPushButton("选取")
+        self.pivot_pick.setToolTip("在画布上点击图片，设置旋转中心")
+        pivot_controls = QHBoxLayout()
+        pivot_controls.setContentsMargins(0, 0, 0, 0)
+        pivot_controls.addWidget(self.pivot_x)
+        pivot_controls.addWidget(self.pivot_y)
+        pivot_controls.addWidget(self.pivot_pick)
         form.addRow("名称", self.name)
         form.addRow(self.visible)
         form.addRow(self.locked)
         form.addRow("层级", self.plane)
         form.addRow("水平固定点", self.pin_x)
         form.addRow("垂直固定点", self.pin_y)
+        form.addRow("旋转中心", pivot_controls)
         form.addRow("序列帧率", self.sequence_fps)
         form.addRow(self.sequence_loop)
         layout.addWidget(general)
@@ -553,8 +640,6 @@ class PropertyPanel(QWidget):
         self.interpolation = QComboBox()
         for value in Interpolation:
             self.interpolation.addItem(value.value, value)
-        self.auto_key = QCheckBox("动作编辑时自动打点")
-        self.auto_key.setChecked(True)
         buttons = QHBoxLayout()
         add = QPushButton("添加/更新")
         remove = QPushButton("删除")
@@ -568,7 +653,6 @@ class PropertyPanel(QWidget):
         buttons.addWidget(remove)
         keyframe_form.addRow("当前属性", self.property)
         keyframe_form.addRow("插值", self.interpolation)
-        keyframe_form.addRow(self.auto_key)
         keyframe_form.addRow(buttons)
         layout.addWidget(keyframes)
         layout.addStretch(1)
@@ -580,6 +664,9 @@ class PropertyPanel(QWidget):
         self.pin_y.currentIndexChanged.connect(self._structure)
         self.sequence_fps.valueChanged.connect(self._structure)
         self.sequence_loop.toggled.connect(self._structure)
+        self.pivot_x.valueChanged.connect(self._structure)
+        self.pivot_y.valueChanged.connect(self._structure)
+        self.pivot_pick.clicked.connect(self.rotation_pivot_pick_requested.emit)
         self.property.currentTextChanged.connect(lambda value: self.sync_values())
 
     def set_context(
@@ -613,7 +700,12 @@ class PropertyPanel(QWidget):
             self.title.setText("未选择图层")
             self._refreshing = False
             return
-        self.title.setText(f"图层：{self.layer.name}")
+        if self.action:
+            self.title.setText(
+                f"图层：{self.layer.name} ｜ {self.action.name} ｜ {self.time_value:.3f} s"
+            )
+        else:
+            self.title.setText(f"图层：{self.layer.name} ｜ 基础状态")
         self.name.setCurrentText(self.layer.name)
         self.visible.setChecked(self.layer.visible)
         self.locked.setChecked(self.layer.locked)
@@ -622,6 +714,8 @@ class PropertyPanel(QWidget):
         self._select_data(self.pin_y, self.layer.pin_y)
         self.sequence_fps.setValue(self.layer.sequence_fps)
         self.sequence_loop.setChecked(self.layer.sequence_loop)
+        self.pivot_x.setValue(self.layer.anchor_x * 100)
+        self.pivot_y.setValue(self.layer.anchor_y * 100)
         is_sequence = self.layer.asset_type == AssetType.SEQUENCE
         self.sequence_fps.setEnabled(is_sequence)
         self.sequence_loop.setEnabled(is_sequence)
@@ -646,11 +740,16 @@ class PropertyPanel(QWidget):
         self.layer.name = self.name.currentText().strip() or self.layer.name
         self.layer.visible = self.visible.isChecked()
         self.layer.locked = self.locked.isChecked()
-        self.layer.plane = self.plane.currentData()
-        self.layer.pin_x = self.pin_x.currentData()
-        self.layer.pin_y = self.pin_y.currentData()
+        # PySide returns the underlying str for str-backed enums stored in a
+        # QComboBox. Keep the model fields as enums so serialization can use
+        # their .value members after an editor change.
+        self.layer.plane = LayerPlane(self.plane.currentData())
+        self.layer.pin_x = HorizontalPin(self.pin_x.currentData())
+        self.layer.pin_y = VerticalPin(self.pin_y.currentData())
         self.layer.sequence_fps = self.sequence_fps.value()
         self.layer.sequence_loop = self.sequence_loop.isChecked()
+        self.layer.anchor_x = self.pivot_x.value() / 100
+        self.layer.anchor_y = self.pivot_y.value() / 100
         self.structure_changed.emit()
 
 
@@ -762,6 +861,17 @@ class SkinEditorWindow(QMainWindow):
         self._toolbar_action(toolbar, "关键帧×0.5", lambda: self.timeline.scale_selected(0.5))
         self._toolbar_action(toolbar, "关键帧×2", lambda: self.timeline.scale_selected(2.0))
         toolbar.addSeparator()
+        zoom_out = self._toolbar_action(toolbar, "-", self.canvas.zoom_out, QKeySequence.ZoomOut)
+        zoom_out.setToolTip("缩小画布")
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setMinimumWidth(44)
+        self.zoom_label.setAlignment(Qt.AlignCenter)
+        toolbar.addWidget(self.zoom_label)
+        zoom_in = self._toolbar_action(toolbar, "+", self.canvas.zoom_in, QKeySequence.ZoomIn)
+        zoom_in.setToolTip("放大画布")
+        reset_view = self._toolbar_action(toolbar, "适应", self.canvas.reset_view)
+        reset_view.setToolTip("重置画布缩放与位置")
+        toolbar.addSeparator()
         self._toolbar_action(toolbar, "应用预览", self._preview)
 
     def _connect(self) -> None:
@@ -776,6 +886,9 @@ class SkinEditorWindow(QMainWindow):
         self.action_panel.add_requested.connect(self._add_action)
         self.action_panel.duplicate_requested.connect(self._duplicate_action)
         self.action_panel.delete_requested.connect(self._delete_action)
+        self.action_panel.play_requested.connect(self._preview_action)
+        self.action_panel.stop_requested.connect(self._stop_action_preview)
+        self.action_panel.daily_requested.connect(self._make_daily_action)
         self.trigger_panel.changed.connect(self._model_changed)
         self.trigger_panel.test_requested.connect(self._test_trigger)
         self.canvas.layer_selected.connect(self._select_layer)
@@ -796,7 +909,24 @@ class SkinEditorWindow(QMainWindow):
         self.properties.structure_changed.connect(self._structure_changed)
         self.properties.add_keyframe_requested.connect(self._add_keyframe)
         self.properties.remove_keyframe_requested.connect(self._remove_keyframe)
+        self.properties.rotation_pivot_pick_requested.connect(self.canvas.begin_rotation_pivot_pick)
+        self.canvas.rotation_pivot_selected.connect(self._set_rotation_pivot)
+        self.canvas.zoom_changed.connect(self._on_canvas_zoom_changed)
         self.panel.preview_state_changed.connect(self._schedule_mirror_refresh)
+
+    def _on_canvas_zoom_changed(self, value: float) -> None:
+        self.zoom_label.setText(f"{round(value * 100)}%")
+
+    def _set_rotation_pivot(self, layer_id: str, x: float, y: float) -> None:
+        layer = self.skin.get_layer_by_id(layer_id)
+        if layer is None:
+            return
+        layer.anchor_x = max(0.0, min(float(x), 1.0))
+        layer.anchor_y = max(0.0, min(float(y), 1.0))
+        self.properties.sync_values()
+        self.canvas.update_state()
+        self._commit_history()
+        self.statusBar().showMessage("已设置旋转中心")
 
     def _schedule_mirror_refresh(self) -> None:
         self._mirror_timer.start()
@@ -989,15 +1119,14 @@ class SkinEditorWindow(QMainWindow):
             self.layer_panel.select(layer_id)
         elif not layer_id:
             self.layer_panel.clear_selection()
-        self.timeline.set_context(self.current_action, self.current_layer)
-        self.timeline.set_time(self.current_time)
+        self.timeline.set_context(self.current_action, self.current_layer, self.current_time)
         self.properties.set_context(self.current_layer, self.current_action, self.current_time)
 
     def _select_action(self, action_id: str) -> None:
         self.current_action = self.skin.get_action_by_id(action_id) if action_id else None
         self.current_time = 0.0
         self.canvas.set_action(self.current_action)
-        self.timeline.set_context(self.current_action, self.current_layer)
+        self.timeline.set_context(self.current_action, self.current_layer, 0.0)
         self.properties.set_context(self.current_layer, self.current_action, 0.0)
         self.statusBar().showMessage(
             f"正在编辑：{self.current_action.name}" if self.current_action else "正在编辑基础状态"
@@ -1012,17 +1141,16 @@ class SkinEditorWindow(QMainWindow):
         layer = self.skin.get_layer_by_id(layer_id)
         if layer is None:
             return
-        if self.current_action and self.properties.auto_key.isChecked():
+        if self.current_action:
+            self._ensure_action_pose(layer)
             track = self.current_action.get_track(
                 layer.id, property_name, float(getattr(layer, property_name))
             )
             existing = track.keyframe_at(self.current_time, tolerance=0.02)
-            interpolation = self.properties.interpolation.currentData()
+            interpolation = Interpolation(self.properties.interpolation.currentData())
             if existing:
                 existing.value = value
                 existing.interpolation = interpolation
-            else:
-                track.add_keyframe(Keyframe(self.current_time, value, interpolation))
         else:
             setattr(layer, property_name, value)
         self.canvas.update_state()
@@ -1031,17 +1159,32 @@ class SkinEditorWindow(QMainWindow):
         if not self._editing:
             self._commit_history()
 
+    def _ensure_action_pose(self, layer: Layer) -> None:
+        """Record a complete, independently editable pose at the playhead."""
+        if not self.current_action:
+            return
+        for property_name in ANIMATABLE_PROPERTIES:
+            base_value = float(getattr(layer, property_name))
+            track = self.current_action.get_track(layer.id, property_name, base_value)
+            if not track.keyframes and self.current_time > 0:
+                track.add_keyframe(Keyframe(0.0, base_value))
+            if track.keyframe_at(self.current_time, tolerance=0.02) is None:
+                value = track.get_value_at(self.current_time) if track.keyframes else base_value
+                track.add_keyframe(Keyframe(self.current_time, value))
+
     def _add_keyframe(self, property_name: str, interpolation: Interpolation) -> None:
         if not self.current_action or not self.current_layer:
             self.statusBar().showMessage("请先选择一个动作和图层")
             return
+        interpolation = Interpolation(interpolation)
+        self._ensure_action_pose(self.current_layer)
         track = self.current_action.get_track(
-            self.current_layer.id,
-            property_name,
+            self.current_layer.id, property_name,
             float(getattr(self.current_layer, property_name)),
         )
-        value = self.properties.spins[property_name].value()
-        track.add_keyframe(Keyframe(self.current_time, value, interpolation))
+        keyframe = track.keyframe_at(self.current_time, tolerance=0.02)
+        if keyframe:
+            keyframe.interpolation = interpolation
         self._refresh_animation()
         self._commit_history()
 
@@ -1191,6 +1334,45 @@ class SkinEditorWindow(QMainWindow):
         self._preview()
         if self.runtime and self.runtime.triggers:
             self.runtime.triggers.fire_for_test(trigger_id)
+
+    def _preview_action(self, action_id: str) -> None:
+        action = self.skin.get_action_by_id(action_id)
+        if action is None:
+            return
+        self._preview()
+        if self.runtime and self.runtime.play_action(action.id):
+            self.statusBar().showMessage(f"正在预览动作：{action.name}")
+        else:
+            self.statusBar().showMessage("动作预览不可用，请先添加图层和关键帧")
+
+    def _stop_action_preview(self, action_id: str) -> None:
+        if self.runtime and self.runtime.player:
+            self.runtime.player.stop(action_id)
+            self.statusBar().showMessage("已停止动作预览")
+
+    def _make_daily_action(self, action_id: str) -> None:
+        action = self.skin.get_action_by_id(action_id)
+        if action is None:
+            return
+        trigger = next((
+            item for item in self.skin.triggers
+            if item.action_id == action.id and item.trigger_type == TriggerType.RANDOM
+        ), None)
+        if trigger is None:
+            trigger = Trigger(
+                name=f"{action.name} 日常",
+                trigger_type=TriggerType.RANDOM,
+                action_id=action.id,
+                random_min=8.0,
+                random_max=20.0,
+            )
+            self.skin.triggers.append(trigger)
+        else:
+            trigger.enabled = True
+        self.trigger_panel.refresh(trigger.id)
+        self._commit_history()
+        self._preview()
+        self.statusBar().showMessage(f"已设为日常动作：{action.name}")
 
     def _new_skin(self) -> None:
         if not self._confirm_replace_current():

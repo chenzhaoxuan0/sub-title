@@ -62,6 +62,52 @@ class ActionPlayerTests(unittest.TestCase):
         self.assertAlmostEqual(state[self.layer_a.id]["x"], 2.5)
         player.stop_all()
 
+    def test_playback_duration_maps_real_time_to_source_timeline(self):
+        action = clip("slow", self.layer_a.id, duration=1, value=10)
+        action.playback_duration = 4
+        self.skin.actions = [action]
+        player = ActionPlayer(self.skin)
+
+        self.assertTrue(player._play_at(action.id, None, 40))
+        state, layer_times = player._tick_at(42)
+
+        self.assertAlmostEqual(state[self.layer_a.id]["x"], 5)
+        self.assertAlmostEqual(layer_times[self.layer_a.id], 0.5)
+        player.stop_all()
+
+    def test_infinite_forward_loop_remains_active_and_wraps(self):
+        action = clip("loop", self.layer_a.id, duration=1, value=10)
+        action.loop_forever = True
+        self.skin.actions = [action]
+        player = ActionPlayer(self.skin)
+
+        self.assertTrue(player._play_at(action.id, None, 50))
+        state, layer_times = player._tick_at(53.25)
+
+        self.assertIn(action.id, player.active_action_ids)
+        self.assertAlmostEqual(state[self.layer_a.id]["x"], 2.5)
+        self.assertAlmostEqual(layer_times[self.layer_a.id], 0.25)
+        player.stop_all()
+
+    def test_infinite_ping_pong_loop_reverses_to_the_start(self):
+        action = clip("bounce", self.layer_a.id, duration=1, value=10)
+        action.loop_forever = True
+        action.ping_pong = True
+        action.playback_duration = 4
+        self.skin.actions = [action]
+        player = ActionPlayer(self.skin)
+
+        self.assertTrue(player._play_at(action.id, None, 60))
+        at_end, _ = player._tick_at(64)
+        returning, _ = player._tick_at(65)
+        at_restart, _ = player._tick_at(68)
+
+        self.assertIn(action.id, player.active_action_ids)
+        self.assertAlmostEqual(at_end[self.layer_a.id]["x"], 10)
+        self.assertAlmostEqual(returning[self.layer_a.id]["x"], 7.5)
+        self.assertAlmostEqual(at_restart[self.layer_a.id]["x"], 0)
+        player.stop_all()
+
 
 if __name__ == "__main__":
     unittest.main()
