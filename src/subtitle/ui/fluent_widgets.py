@@ -356,6 +356,60 @@ def build_fluent_qss(colors) -> str:
             color: {text};
             background-color: {card_hover};
         }}
+        /* 设置页可折叠侧边栏：QSplitter 分隔条 */
+        QSplitter::handle:horizontal {{
+            background-color: {border};
+            width: 2px;
+            margin: 4px 1px;
+            border-radius: 1px;
+        }}
+        QSplitter::handle:horizontal:hover {{
+            background-color: {accent};
+        }}
+        /* 侧边栏容器：无外框，透出对话框底色 */
+        #sidebarContainer {{
+            background: transparent;
+            border: none;
+        }}
+        /* 折叠/展开切换按钮：扁平小按钮 */
+        #sidebarToggle {{
+            background-color: {card_bg};
+            color: {text};
+            border: 1px solid {border};
+            border-radius: 6px;
+            padding: 2px;
+            font-size: 14px;
+            min-width: 24px;
+        }}
+        #sidebarToggle:hover {{
+            background-color: {card_hover};
+            border-color: {accent};
+        }}
+        /* 导航列表：去掉外框（嵌在 splitter 内不需要），保留底色区分内容区 */
+        QListWidget#settingsNav {{
+            background-color: {card_bg};
+            color: {content_color};
+            border: 1px solid {border};
+            border-radius: 8px;
+            padding: 6px 4px;
+            outline: 0;
+            font-size: 13px;
+        }}
+        /* 导航项：统一高度 + 内边距，选中态用左侧 accent 竖条（与原垂直标签页视觉一致） */
+        QListWidget#settingsNav::item {{
+            padding: 10px 12px;
+            border-left: 3px solid transparent;
+            border-radius: 4px;
+        }}
+        QListWidget#settingsNav::item:selected {{
+            color: {text};
+            background-color: {card_hover};
+            border-left: 3px solid {accent};
+        }}
+        QListWidget#settingsNav::item:hover:!selected {{
+            color: {text};
+            background-color: {card_hover};
+        }}
         /* 卡片 */
         #settingCard {{
             background-color: {card_bg};

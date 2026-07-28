@@ -150,6 +150,9 @@ class UiConfig:
     # 麦克风字幕颜色（电脑声音用主题 subtitle_text）。走 UiConfig 而非 ThemeColors，
     # 避免改动主题 JSON 结构与现有主题迁移。
     mic_color: str = "#5aa9ff"
+    # 设置对话框侧边栏：宽度可拖拽调、可一键收起为窄条。跨会话记忆。
+    settings_sidebar_width: int = 200        # 展开时导航栏宽度（px）
+    settings_sidebar_collapsed: bool = False  # 是否收起为窄条
 
 
 @dataclass

@@ -8,15 +8,15 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, QEvent, QPoint, QThread, Signal
+from PySide6.QtCore import Qt, QTimer, QEvent, QPoint, QThread, Signal, QSize
 from PySide6.QtGui import QFont, QColor, QCloseEvent
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QSpinBox,
-    QCheckBox, QDialogButtonBox, QLabel, QGroupBox, QTabWidget, QWidget,
+    QCheckBox, QDialogButtonBox, QLabel, QGroupBox, QWidget,
     QTextEdit, QPushButton, QFontComboBox, QApplication, QMessageBox,
     QLineEdit, QStackedWidget, QDoubleSpinBox, QColorDialog, QScrollArea,
     QFrame, QSizePolicy, QFileDialog, QListWidget, QListWidgetItem,
-    QAbstractItemView, QToolTip,
+    QAbstractItemView, QToolTip, QSplitter, QListView,
 )
 
 from ..config import Config, AsrConfig
@@ -31,7 +31,6 @@ from .theme_engine import (
 )
 from .fluent_widgets import (
     SettingCard, SettingCardGroup, ToggleSwitch, build_fluent_qss,
-    HorizontalTextTabBar,
 )
 from .trash_dialog import TrashDialog
 from .flow_layout import FlowLayout
@@ -498,26 +497,82 @@ class SettingsDialog(QDialog):
             sw.set_track_colors(off, knob)
 
     # ---------- UI 构建 ----------
+    # 侧边栏收起态宽度（仅放一个展开箭头按钮的窄条）
+    _SIDEBAR_COLLAPSED_WIDTH = 32
+    # 侧边栏宽度上下限（拖拽时夹紧到这个范围）
+    _SIDEBAR_MIN_WIDTH = 140
+    _SIDEBAR_MAX_WIDTH = 360
+
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
-        self.tabs = QTabWidget()
-        # 必须使用真正的 QTabBar 子类。给现有实例动态赋值 paintEvent 不会被 Qt 的
-        # C++ 事件分派调用，因此无法改变默认的竖排文字。
-        self.tabs.setTabBar(HorizontalTextTabBar(self.tabs))
-        # 垂直标签页：左侧导航栏，右侧内容区。给内容更多纵向空间，
-        # 也让设置项更聚合（5 个标签纵向排列比顶部更紧凑）。
-        self.tabs.setTabPosition(QTabWidget.West)
-        layout.addWidget(self.tabs, 1)
 
-        self.tabs.addTab(self._build_recognition_tab(), "识别")
-        self.tabs.addTab(self._build_engine_mgmt_tab(), "引擎管理")
-        self.tabs.addTab(self._build_speaker_tab(), "说话人")
-        self.tabs.addTab(self._build_appearance_tab(), "外观")
-        self.tabs.addTab(self._build_behavior_tab(), "行为")
-        self.tabs.addTab(self._build_skin_tab(), "皮肤")
-        self.tabs.addTab(self._build_transcript_tab(), "文稿")
-        self.tabs.currentChanged.connect(self._on_tab_changed)
+        # 可折叠/可调宽侧边栏：左 QListWidget 导航 + 右 QStackedWidget 内容，
+        # 由 QSplitter 承载——用户可拖动分隔条调整宽度。
+        # （早先用 QTabWidget+West+HorizontalTextTabBar，但 tab bar 宽度无法拖拽、
+        # 也无法整体折叠，故改为本方案。）
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(4)
+
+        # ---- 左：侧边栏容器（顶部折叠按钮 + 导航列表）----
+        self._nav_container = QWidget()
+        self._nav_container.setObjectName("sidebarContainer")
+        nav_v = QVBoxLayout(self._nav_container)
+        nav_v.setContentsMargins(0, 0, 0, 0)
+        nav_v.setSpacing(6)
+
+        # 折叠/展开切换按钮
+        self._collapse_btn = QPushButton("◀")
+        self._collapse_btn.setObjectName("sidebarToggle")
+        self._collapse_btn.setCursor(Qt.PointingHandCursor)
+        self._collapse_btn.setToolTip("收起侧边栏")
+        self._collapse_btn.setFixedHeight(28)
+        self._collapse_btn.clicked.connect(self._toggle_sidebar)
+        nav_v.addWidget(self._collapse_btn)
+
+        # 导航列表（不可拖拽重排、单选、点击切换页面）
+        self.nav_list = QListWidget()
+        self.nav_list.setObjectName("settingsNav")
+        self.nav_list.setMovement(QListView.Static)
+        self.nav_list.setResizeMode(QListView.Adjust)
+        self.nav_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.nav_list.setFocusPolicy(Qt.NoFocus)
+        self.nav_list.setUniformItemSizes(True)
+        self.nav_list.setSpacing(2)
+        nav_v.addWidget(self.nav_list, 1)
+
+        # ---- 右：内容区 ----
+        self.stack = QStackedWidget()
+
+        # 页面定义（顺序即导航顺序，索引一一对应）
+        pages = [
+            ("识别", self._build_recognition_tab()),
+            ("引擎管理", self._build_engine_mgmt_tab()),
+            ("说话人", self._build_speaker_tab()),
+            ("外观", self._build_appearance_tab()),
+            ("行为", self._build_behavior_tab()),
+            ("皮肤", self._build_skin_tab()),
+            ("文稿", self._build_transcript_tab()),
+        ]
+        for title, page in pages:
+            self.nav_list.addItem(title)
+            self.stack.addWidget(page)
+        self.nav_list.setCurrentRow(0)
+        self.nav_list.currentRowChanged.connect(self._on_tab_changed)
+
+        # 内部状态：当前展开宽度 + 是否收起（_apply_sidebar_state 会用 cfg 覆盖）
+        self._sidebar_width = 200
+        self._sidebar_collapsed = False
+
+        self.splitter.addWidget(self._nav_container)
+        self.splitter.addWidget(self.stack)
+        self.splitter.setStretchFactor(0, 0)   # 导航栏不抢占内容区空间
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([self._sidebar_width, 640])
+        # 拖动分隔条 → 实时记忆宽度（写回 cfg 对象，落盘靠关闭时 app._save_config）
+        self.splitter.splitterMoved.connect(self._on_sidebar_resized)
+        layout.addWidget(self.splitter, 1)
 
         btns = QDialogButtonBox(QDialogButtonBox.Apply | QDialogButtonBox.Close)
         self._apply_btn = btns.button(QDialogButtonBox.Apply)
@@ -1226,6 +1281,9 @@ class SettingsDialog(QDialog):
         self.grid_size_spin.setValue(skin.editor_grid_size)
         self.guides_check.setChecked(skin.editor_show_guides)
 
+        # 侧边栏宽度 / 展开状态（最后应用，依赖 splitter 已布局）
+        self._apply_sidebar_state()
+
     def _sync_color_buttons(self):
         colors = self._theme_mgr.current.colors
         for key, btn in self.color_buttons.items():
@@ -1302,14 +1360,64 @@ class SettingsDialog(QDialog):
         QTimer.singleShot(1200, lambda: self.copy_btn.setText("📋 复制全部"))
 
     def _on_tab_changed(self, idx: int):
-        text = self.tabs.tabText(idx)
-        # 用 tabText 判断「文稿」tab：tab 顺序变了不破坏这里。
+        # 按标题字符串判断页面（不依赖索引），导航顺序变化也不破坏懒加载逻辑。
+        item = self.nav_list.item(idx)
+        text = item.text() if item is not None else ""
+        # 切换内容区（QListWidget 选中 → QStackedWidget 切页）
+        if 0 <= idx < self.stack.count():
+            self.stack.setCurrentIndex(idx)
         if text == "文稿":
             self._refresh_transcript()
         # 首次切到「引擎管理」页时触发 conda 环境扫描（懒加载，避免构造时启动后台线程）。
         if text == "引擎管理" and getattr(self, "_conda_scan_pending", False):
             self._conda_scan_pending = False
             self._start_conda_scan()
+
+    # ---------- 可折叠/可调宽侧边栏 ----------
+    def _toggle_sidebar(self):
+        """展开 ↔ 收起侧边栏。收起后只剩窄条 + 展开箭头。"""
+        self._sidebar_collapsed = not self._sidebar_collapsed
+        self._apply_sidebar_geometry()
+        self.cfg.ui.settings_sidebar_collapsed = self._sidebar_collapsed
+
+    def _apply_sidebar_geometry(self):
+        """根据当前 _sidebar_collapsed / _sidebar_width 应用侧边栏尺寸。"""
+        if self._sidebar_collapsed:
+            # 收起：隐藏导航文字，容器锁成窄条宽度，按钮变「展开」箭头。
+            self.nav_list.setVisible(False)
+            self._nav_container.setFixedWidth(self._SIDEBAR_COLLAPSED_WIDTH)
+            # setFixedWidth 会覆盖 splitter 的弹性，保证收起后不被 splitter 拉宽。
+            self._collapse_btn.setText("▶")
+            self._collapse_btn.setToolTip("展开侧边栏")
+        else:
+            self.nav_list.setVisible(True)
+            # 解除 fixed 宽度约束，恢复由 splitter sizes 控制（可拖拽）。
+            self._nav_container.setMaximumWidth(self._SIDEBAR_MAX_WIDTH)
+            self._nav_container.setMinimumWidth(self._SIDEBAR_MIN_WIDTH)
+            self._nav_container.setFixedWidth(self._sidebar_width)
+            self._collapse_btn.setText("◀")
+            self._collapse_btn.setToolTip("收起侧边栏")
+            # 让 splitter 重算布局，使内容区收回让出的空间。
+            w = max(self._SIDEBAR_MIN_WIDTH, min(self._sidebar_width, self._SIDEBAR_MAX_WIDTH))
+            self.splitter.setSizes([w, max(0, self.splitter.width() - w - self.splitter.handleWidth())])
+
+    def _on_sidebar_resized(self, _pos: int, _index: int):
+        """用户拖动 splitter → 记忆新宽度（仅展开态）。"""
+        if self._sidebar_collapsed:
+            return
+        new_w = self.splitter.sizes()[0] if self.splitter.sizes() else self._sidebar_width
+        new_w = max(self._SIDEBAR_MIN_WIDTH, min(new_w, self._SIDEBAR_MAX_WIDTH))
+        self._sidebar_width = new_w
+        self.cfg.ui.settings_sidebar_width = new_w
+
+    def _apply_sidebar_state(self):
+        """从 cfg 恢复侧边栏宽度和展开/收起状态（_load_current_state 末尾调用）。"""
+        self._sidebar_width = max(
+            self._SIDEBAR_MIN_WIDTH,
+            min(int(self.cfg.ui.settings_sidebar_width), self._SIDEBAR_MAX_WIDTH),
+        )
+        self._sidebar_collapsed = bool(self.cfg.ui.settings_sidebar_collapsed)
+        self._apply_sidebar_geometry()
 
     def _on_theme_preview(self):
         name = self.theme_combo.currentData()
