@@ -625,6 +625,16 @@ class SettingsDialog(QDialog):
                 return True
         return super().eventFilter(obj, event)
 
+    def showEvent(self, event):
+        """首次显示时 splitter 才拿到真实宽度——此刻重新应用侧边栏尺寸，
+
+        避免构造期 splitter.width() 不可靠导致内容区/侧边栏分配错误。
+        """
+        super().showEvent(event)
+        if not getattr(self, "_sidebar_geom_applied", False):
+            self._sidebar_geom_applied = True
+            self._apply_sidebar_geometry()
+
     def closeEvent(self, event: QCloseEvent) -> None:
         """标题栏 X 与底部 Close 按钮走同一路径：reject → finished → app 保存配置。
 
@@ -1374,6 +1384,10 @@ class SettingsDialog(QDialog):
             self._start_conda_scan()
 
     # ---------- 可折叠/可调宽侧边栏 ----------
+    # 设计要点：宽度由 splitter.setSizes() 唯一控制，绝不给 nav_container 调
+    # setFixedWidth/setMinimumWidth/setMaximumWidth（那样会锁死宽度、splitter
+    # handle 拖不动，且与 splitter 抢控制权）。收起态用 setSizes 把侧边栏压到
+    # 窄条宽度，剩余空间全部分给内容区——内容区自然左移延伸。
     def _toggle_sidebar(self):
         """展开 ↔ 收起侧边栏。收起后只剩窄条 + 展开箭头。"""
         self._sidebar_collapsed = not self._sidebar_collapsed
@@ -1381,25 +1395,34 @@ class SettingsDialog(QDialog):
         self.cfg.ui.settings_sidebar_collapsed = self._sidebar_collapsed
 
     def _apply_sidebar_geometry(self):
-        """根据当前 _sidebar_collapsed / _sidebar_width 应用侧边栏尺寸。"""
+        """根据当前 _sidebar_collapsed / _sidebar_width 应用侧边栏尺寸。
+
+        通过 splitter.setSizes 重分配：侧边栏取目标宽度，剩余全部分给内容区，
+        这样收起时内容区会自动左移延伸填满。展开/收起切换 handle 是否可拖。
+        """
+        total = self.splitter.width() - self.splitter.handleWidth()
         if self._sidebar_collapsed:
-            # 收起：隐藏导航文字，容器锁成窄条宽度，按钮变「展开」箭头。
+            # 收起：隐藏导航文字，侧边栏压到窄条宽度，内容区吃掉让出的空间。
             self.nav_list.setVisible(False)
-            self._nav_container.setFixedWidth(self._SIDEBAR_COLLAPSED_WIDTH)
-            # setFixedWidth 会覆盖 splitter 的弹性，保证收起后不被 splitter 拉宽。
             self._collapse_btn.setText("▶")
             self._collapse_btn.setToolTip("展开侧边栏")
+            target = self._SIDEBAR_COLLAPSED_WIDTH
+            # 收起态不允许再拖 handle（避免拖出半开不开的状态）
+            self._nav_container.setMinimumWidth(self._SIDEBAR_COLLAPSED_WIDTH)
+            self._nav_container.setMaximumWidth(self._SIDEBAR_COLLAPSED_WIDTH)
         else:
             self.nav_list.setVisible(True)
-            # 解除 fixed 宽度约束，恢复由 splitter sizes 控制（可拖拽）。
-            self._nav_container.setMaximumWidth(self._SIDEBAR_MAX_WIDTH)
-            self._nav_container.setMinimumWidth(self._SIDEBAR_MIN_WIDTH)
-            self._nav_container.setFixedWidth(self._sidebar_width)
             self._collapse_btn.setText("◀")
             self._collapse_btn.setToolTip("收起侧边栏")
-            # 让 splitter 重算布局，使内容区收回让出的空间。
-            w = max(self._SIDEBAR_MIN_WIDTH, min(self._sidebar_width, self._SIDEBAR_MAX_WIDTH))
-            self.splitter.setSizes([w, max(0, self.splitter.width() - w - self.splitter.handleWidth())])
+            target = max(self._SIDEBAR_MIN_WIDTH,
+                         min(self._sidebar_width, self._SIDEBAR_MAX_WIDTH))
+            # 展开态：解除 fixed 约束，仅保留宽松上下限，由 splitter sizes 控宽（可拖拽）。
+            # 注意：minimum/maximum 必须给 splitter 留出活动范围，否则 handle 拖不动。
+            self._nav_container.setMinimumWidth(self._SIDEBAR_MIN_WIDTH)
+            self._nav_container.setMaximumWidth(self._SIDEBAR_MAX_WIDTH)
+        # 剩余空间全给内容区（total - target，下限 0）
+        rest = max(0, total - target)
+        self.splitter.setSizes([target, rest])
 
     def _on_sidebar_resized(self, _pos: int, _index: int):
         """用户拖动 splitter → 记忆新宽度（仅展开态）。"""
