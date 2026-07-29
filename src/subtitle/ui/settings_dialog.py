@@ -116,6 +116,12 @@ class EngineConfigCard(SettingCard):
         # 避免水平布局把 combo/stack 挤成右侧窄条。
         super().__init__(title, content, None, parent=parent, vertical=True)
         self._fw_available = True
+        # 缓存 load_from 传入的 AsrConfig，供按钮回调取 port/language 等字段
+        # （EngineConfigCard 没有 cfg；那是 SettingsDialog 的属性）。
+        self._asr: AsrConfig | None = None
+        # WSL 服务管理的后台 worker 引用（Setup/Server/Status 三类，同时只跑一个）
+        self._wsl_worker: QThread | None = None
+        self._wsl_busy = False   # 安装/启动/停止进行中（按钮禁用）
         container = QWidget()
         cl = QVBoxLayout(container)
         cl.setContentsMargins(0, 0, 0, 0)
@@ -230,8 +236,50 @@ class EngineConfigCard(SettingCard):
         for label, value in (("中文", "中文"), ("英文", "English"), ("日文", "Japanese")):
             self.nano_language_combo.addItem(label, value)
         lp.addWidget(_row("语言", "指定语言可提升准确率", self.nano_language_combo, vertical=True))
+
+        # 推理模式：段式（默认，零依赖） vs 流式（需 WSL2 里的 realtime-server）
+        self.nano_mode_combo = QComboBox()
+        self.nano_mode_combo.addItem("段式（默认，零依赖）", "segment")
+        self.nano_mode_combo.addItem("流式（需 WSL2 realtime-server，逐字低延迟）", "streaming")
+        lp.addWidget(_row(
+            "推理模式",
+            "段式=简单低配，攒满段长出一段；流式=逐字输出延迟低，但需先在 WSL2 起 "
+            "funasr-realtime-server 且更吃显存，连不上时自动回退段式",
+            self.nano_mode_combo, vertical=True,
+        ))
+        # 流式地址提示（仅流式模式显示）
+        self.nano_stream_addr_hint = QLabel(
+            "连接到 localhost:10095（funasr-realtime-server 默认端口）。\n"
+            "在 WSL2 里启动服务：funasr-realtime-server --endpoint-mode client --port 10095\n"
+            "旧版 Windows 若 localhost 不通，请在 config.yaml 改用 WSL IP（wsl hostname -I 查看）。"
+        )
+        self.nano_stream_addr_hint.setStyleSheet("color: #888; font-size: 11px;")
+        self.nano_stream_addr_hint.setWordWrap(True)
+        self.nano_stream_addr_hint.hide()
+        lp.addWidget(self.nano_stream_addr_hint)
+        # 流式 VRAM 警告（vLLM 预分配显存，低显存易 OOM）
+        self.nano_stream_vram_warn = QLabel("")
+        self.nano_stream_vram_warn.setStyleSheet("color: #c77; font-size: 11px;")
+        self.nano_stream_vram_warn.setWordWrap(True)
+        self.nano_stream_vram_warn.hide()
+        lp.addWidget(self.nano_stream_vram_warn)
+
+        # 一键起 WSL 服务：按钮负责装环境（首次约 30 分钟）+ 起/停 funasr-realtime-server。
+        # 仅流式模式显示（_on_nano_mode_changed 联动）。后台 worker 跑，状态标签实时反馈。
+        self.nano_wsl_status = QLabel("正在检测 WSL 服务状态…")
+        self.nano_wsl_status.setStyleSheet("color: #888; font-size: 11px;")
+        self.nano_wsl_status.setWordWrap(True)
+        self.nano_wsl_status.hide()
+        lp.addWidget(self.nano_wsl_status)
+        self.nano_wsl_btn = QPushButton()
+        self.nano_wsl_btn.clicked.connect(self._on_nano_wsl_btn)
+        self.nano_wsl_btn.hide()
+        lp.addWidget(self.nano_wsl_btn)
+
         self.nano_segment_spin = self._segment_spin()
-        lp.addWidget(_row("攒段时长", "段式实时，越小延迟越低但易切词", self.nano_segment_spin, vertical=True))
+        lp.addWidget(_row("攒段时长", "仅段式模式用；越小延迟越低但易切词", self.nano_segment_spin, vertical=True))
+        # 联动：切模式 → 显隐相关控件 + 刷新 VRAM 警告
+        self.nano_mode_combo.currentIndexChanged.connect(self._on_nano_mode_changed)
         lp.addStretch(1)
         self.stack.addWidget(panel)
 
@@ -356,6 +404,156 @@ class EngineConfigCard(SettingCard):
         etype = self.engine_combo.currentData()
         self.stack.setCurrentIndex(self._STACK_INDEX.get(etype, 0))
 
+    def _on_nano_mode_changed(self) -> None:
+        """Fun-ASR-Nano 段式/流式联动：流式时禁用攒段时长、显示地址与 VRAM 警告。
+
+        注意：此槽由 nano_mode_combo 的 currentIndexChanged 触发。load_from() 用
+        blockSignals 静默设置 combo 值（不触发本槽），避免构造期间启动 WSL 后台
+        worker（worker 在对话框未构造完时操作 UI 控件会导致 Qt 段错误闪退）。
+        因此本槽只在**用户手动切换**模式时执行，可安全触发 WSL 状态探测。
+        """
+        streaming = self.nano_mode_combo.currentData() == "streaming"
+        # 攒段时长仅段式有意义；流式忽略，灰掉避免误操作
+        self.nano_segment_spin.setEnabled(not streaming)
+        self.nano_stream_addr_hint.setVisible(streaming)
+        # WSL 一键服务按钮仅流式显示；切到流式时触发一次状态探测
+        self.nano_wsl_btn.setVisible(streaming)
+        self.nano_wsl_status.setVisible(streaming)
+        if streaming and not self._wsl_busy:
+            self._refresh_nano_wsl_status()
+        if not streaming:
+            self.nano_stream_vram_warn.hide()
+            return
+        # VRAM 警告：vLLM 启动时预分配显存，低显存机器开流式易 OOM
+        vram = float(self._hardware_info.get("cuda_vram_gb", 0) or 0)
+        if not self._hardware_info.get("has_cuda") or vram < 6:
+            self.nano_stream_vram_warn.setText(
+                f"⚠️ 流式（vLLM）建议 ≥6GB 显存，当前检测到 {vram:g}GB，可能 OOM"
+            )
+            self.nano_stream_vram_warn.show()
+        else:
+            self.nano_stream_vram_warn.hide()
+
+    def _apply_nano_mode_state(self, streaming: bool) -> None:
+        """构造期恢复 UI 状态（不触发 WSL 探测）。供 load_from 调用。
+
+        与 _on_nano_mode_changed 的区别：本方法不启动后台 worker，仅同步控件显隐，
+        避免对话框构造未完成时 QThread 操作 UI 导致段错误。
+        """
+        self.nano_segment_spin.setEnabled(not streaming)
+        self.nano_stream_addr_hint.setVisible(streaming)
+        self.nano_wsl_btn.setVisible(streaming)
+        self.nano_wsl_status.setVisible(streaming)
+        if not streaming:
+            self.nano_stream_vram_warn.hide()
+            return
+        vram = float(self._hardware_info.get("cuda_vram_gb", 0) or 0)
+        if not self._hardware_info.get("has_cuda") or vram < 6:
+            self.nano_stream_vram_warn.setText(
+                f"⚠️ 流式（vLLM）建议 ≥6GB 显存，当前检测到 {vram:g}GB，可能 OOM"
+            )
+            self.nano_stream_vram_warn.show()
+        else:
+            self.nano_stream_vram_warn.hide()
+        # 流式模式给个占位文案，等对话框显示后由 _kickoff_nano_wsl_probe 延迟探测
+        self.nano_wsl_status.setText("（打开后自动检测 WSL 服务状态）")
+        self.nano_wsl_btn.setEnabled(False)
+        self.nano_wsl_btn.setText("待检测…")
+
+    # ---- WSL 一键服务：状态探测 / 按钮点击 / 后台 worker 回调 ----
+    def _refresh_nano_wsl_status(self) -> None:
+        """后台探测 WSL 服务状态，据此设按钮文案（status() 会 spawn wsl.exe，不能在 UI 线程）。"""
+        self.nano_wsl_status.setText("正在检测 WSL 服务状态…")
+        self.nano_wsl_btn.setEnabled(False)
+        self.nano_wsl_btn.setText("检测中…")
+        self._wsl_worker = _WslStatusWorker()
+        self._wsl_worker.finished_status.connect(self._on_nano_wsl_status)
+        self._wsl_worker.start()
+
+    def _on_nano_wsl_status(self, result: object) -> None:
+        """状态探测完成：根据 installed/running 切按钮文案与可点的动作。"""
+        if not isinstance(result, dict):
+            result = {"installed": False, "running": False}
+        installed = bool(result.get("installed"))
+        running = bool(result.get("running"))
+        self._wsl_worker = None
+        if self._wsl_busy:
+            return   # 探测期间用户已点了动作，交给动作回调去刷新
+        self.nano_wsl_btn.setEnabled(True)
+        if running:
+            self.nano_wsl_status.setText("✅ WSL 流式服务运行中（持续占用显存，退出程序时自动关闭）")
+            self.nano_wsl_btn.setText("停止 WSL 服务")
+        elif installed:
+            self.nano_wsl_status.setText("推理环境已就绪（funasr/vllm 已装），服务未运行")
+            self.nano_wsl_btn.setText("启动 WSL 服务")
+        else:
+            # 这里检测的是「nano 推理环境」（conda 环境 + funasr/vllm/websockets）是否装好，
+            # 不是 WSL2 本身（WSL2 已装才会显示这个面板）。文案必须说清，避免误以为 WSL2 缺失。
+            self.nano_wsl_status.setText(
+                "WSL2 已检测到，但 nano 推理环境（funasr/vllm）尚未安装")
+            self.nano_wsl_btn.setText("安装 nano 推理环境（首次约 30 分钟）")
+
+    def _on_nano_wsl_btn(self) -> None:
+        """主按钮分发：按当前文案决定 装/起/停。"""
+        text = self.nano_wsl_btn.text()
+        self._wsl_busy = True
+        self.nano_wsl_btn.setEnabled(False)
+        if "安装" in text:
+            self.nano_wsl_status.setText("开始安装 WSL 环境（下载 + 安装，请耐心等待）…")
+            self.nano_wsl_btn.setText("安装中…")
+            worker: QThread = _WslSetupWorker()
+            worker.progress.connect(
+                lambda msg: self.nano_wsl_status.setText(f"安装中：{msg}"))
+            worker.finished_ok.connect(self._on_nano_wsl_setup_done)
+        elif "停止" in text:
+            self.nano_wsl_status.setText("正在停止 WSL 服务（释放显存）…")
+            self.nano_wsl_btn.setText("停止中…")
+            worker = _WslServerWorker(action="stop")
+            worker.finished_ok.connect(self._on_nano_wsl_stop_done)
+        else:  # 启动
+            asr = self._asr
+            port = int(getattr(asr, "funasr_nano_streaming_port", 10095)) if asr else 10095
+            lang = getattr(asr, "funasr_nano_language", "中文") if asr else "中文"
+            self.nano_wsl_status.setText("启动 WSL 服务（vLLM 加载模型，约 1-2 分钟）…")
+            self.nano_wsl_btn.setText("启动中…")
+            worker = _WslServerWorker(action="start", port=port, language=lang)
+            worker.progress.connect(
+                lambda msg: self.nano_wsl_status.setText(f"启动中：{msg}"))
+            worker.finished_ok.connect(self._on_nano_wsl_start_done)
+        self._wsl_worker = worker
+        worker.start()
+
+    def _on_nano_wsl_setup_done(self, ok: bool, err: str) -> None:
+        self._wsl_busy = False
+        self._wsl_worker = None
+        if ok:
+            self.nano_wsl_status.setText("✅ nano 推理环境安装完成")
+            self._refresh_nano_wsl_status()
+        else:
+            # 失败时【不要】立即刷新（会覆盖错误信息）。显式展示失败原因 + 让按钮可重试。
+            self.nano_wsl_status.setText(
+                f"❌ 安装失败：{err}（可重新点击按钮重试，已完成的步骤会跳过）")
+            self.nano_wsl_btn.setEnabled(True)
+            self.nano_wsl_btn.setText("重试安装 nano 推理环境")
+
+    def _on_nano_wsl_start_done(self, ok: bool, err: str) -> None:
+        self._wsl_busy = False
+        self._wsl_worker = None
+        if not ok:
+            self.nano_wsl_status.setText(
+                f"❌ 启动失败：{err}（可重新点击按钮重试）")
+            self.nano_wsl_btn.setEnabled(True)
+            self.nano_wsl_btn.setText("启动 WSL 服务")
+            return
+        self._refresh_nano_wsl_status()
+
+    def _on_nano_wsl_stop_done(self, ok: bool, err: str) -> None:
+        self._wsl_busy = False
+        self._wsl_worker = None
+        if not ok:
+            self.nano_wsl_status.setText("⚠️ 停止可能未完全生效（显存或未释放）")
+        self._refresh_nano_wsl_status()
+
     def _apply_hardware_recommendation(self):
         engine_type, overrides = hardware.recommend_engine(self._hardware_info)
         self.engine_combo.setCurrentIndex(max(0, self.engine_combo.findData(engine_type)))
@@ -385,6 +583,7 @@ class EngineConfigCard(SettingCard):
 
     # ---- 读写 AsrConfig ----
     def load_from(self, asr: AsrConfig) -> None:
+        self._asr = asr   # 缓存，供 WSL 启动按钮取 port/language
         idx = self.engine_combo.findData(asr.engine_type)
         self.engine_combo.setCurrentIndex(max(0, idx))
         self._sync_stack()
@@ -400,7 +599,16 @@ class EngineConfigCard(SettingCard):
             max(0, self.nano_device_combo.findData(asr.funasr_nano_device)))
         self.nano_language_combo.setCurrentIndex(
             max(0, self.nano_language_combo.findData(asr.funasr_nano_language)))
+        # 用 blockSignals 静默设 combo，避免触发 _on_nano_mode_changed 的 WSL 后台探测
+        # （构造期间启动 QThread 操作未建好的 UI 控件会段错误闪退）。状态用
+        # _apply_nano_mode_state 同步显隐，真正的 WSL 探测推迟到对话框显示后。
+        self.nano_mode_combo.blockSignals(True)
+        self.nano_mode_combo.setCurrentIndex(
+            max(0, self.nano_mode_combo.findData(getattr(asr, "funasr_nano_mode", "segment"))))
+        self.nano_mode_combo.blockSignals(False)
         self.nano_segment_spin.setValue(asr.funasr_nano_segment_seconds)
+        self._apply_nano_mode_state(
+            self.nano_mode_combo.currentData() == "streaming")
         self.qwen3_model_combo.setCurrentIndex(
             max(0, self.qwen3_model_combo.findData(asr.qwen3_asr_model)))
         self.qwen3_device_combo.setCurrentIndex(
@@ -431,6 +639,7 @@ class EngineConfigCard(SettingCard):
         asr.sensevoice_segment_seconds = self.sv_segment_spin.value()
         asr.funasr_nano_device = self.nano_device_combo.currentData()
         asr.funasr_nano_language = self.nano_language_combo.currentData()
+        asr.funasr_nano_mode = self.nano_mode_combo.currentData()
         asr.funasr_nano_segment_seconds = self.nano_segment_spin.value()
         asr.qwen3_asr_model = self.qwen3_model_combo.currentData()
         asr.qwen3_asr_device = self.qwen3_device_combo.currentData()
@@ -462,6 +671,64 @@ class _CondaScanWorker(QThread):
             envs = []   # 扫描整体失败时给空列表，UI 显示"未发现"
             print(f"[conda-scan] 扫描失败: {e}")
         self.finished.emit(envs)
+
+
+class _WslSetupWorker(QThread):
+    """后台装 WSL 环境（耗时几十分钟，不能阻塞 UI）。
+
+    仿 _CondaScanWorker 的 QThread 模式。progress 信号实时回报步骤文本，
+    finished 信号回主线程通知成功/失败 + 错误信息。
+    """
+
+    progress = Signal(str)
+    finished_ok = Signal(bool, str)   # (成功, 错误信息/空)
+
+    def run(self):
+        from ..asr.wsl_nano_service import WslNanoService
+        try:
+            ok, err = WslNanoService().setup_environment(self.progress.emit)
+        except Exception as e:
+            ok, err = False, f"安装异常: {e}"
+        self.finished_ok.emit(ok, err)
+
+
+class _WslServerWorker(QThread):
+    """后台起/停 WSL 服务（起服务含 vLLM 模型加载，1-2 分钟）。"""
+
+    progress = Signal(str)
+    finished_ok = Signal(bool, str)   # (成功, 错误信息/空)
+
+    def __init__(self, action: str, port: int = 10095, language: str = "中文"):
+        super().__init__()
+        self._action = action      # "start" / "stop"
+        self._port = port
+        self._language = language
+
+    def run(self):
+        from ..asr.wsl_nano_service import WslNanoService
+        svc = WslNanoService()
+        try:
+            if self._action == "stop":
+                ok, err = svc.stop_server(), ""
+            else:
+                ok, err = svc.start_server(self._port, self._language, self.progress.emit)
+        except Exception as e:
+            ok, err = False, f"操作异常: {e}"
+        self.finished_ok.emit(ok, err)
+
+
+class _WslStatusWorker(QThread):
+    """后台查 WSL 服务状态（status() 会 spawn wsl.exe，冷启动 1-2s，避免卡 UI）。"""
+
+    finished_status = Signal(object)   # dict {"installed", "running"}
+
+    def run(self):
+        from ..asr.wsl_nano_service import WslNanoService
+        try:
+            result = WslNanoService().status()
+        except Exception:
+            result = {"installed": False, "running": False}
+        self.finished_status.emit(result)
 
 
 class SettingsDialog(QDialog):
@@ -636,6 +903,23 @@ class SettingsDialog(QDialog):
         if not getattr(self, "_sidebar_geom_applied", False):
             self._sidebar_geom_applied = True
             self._apply_sidebar_geometry()
+        # 首次显示后延迟触发 WSL 服务状态探测（构造期不探测，避免 QThread 操作
+        # 未建好 UI 导致闪退）。仅对处于流式模式的卡片探测；用 singleShot 排到
+        # 事件循环，确保对话框已完全布局完毕。
+        if not getattr(self, "_wsl_probe_kicked", False):
+            self._wsl_probe_kicked = True
+            QTimer.singleShot(0, self._kickoff_nano_wsl_probe)
+
+    def _kickoff_nano_wsl_probe(self) -> None:
+        """对话框显示后，对流式模式的引擎卡片触发一次 WSL 状态探测。"""
+        for card in (self.system_engine_card, self.mic_engine_card):
+            try:
+                combo = getattr(card, "nano_mode_combo", None)
+                if combo is not None and combo.currentData() == "streaming":
+                    if not getattr(card, "_wsl_busy", False):
+                        card._refresh_nano_wsl_status()
+            except Exception as e:
+                print(f"[settings] WSL 探测触发异常: {e}")
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """标题栏 X 与底部 Close 按钮走同一路径：reject → finished → app 保存配置。
