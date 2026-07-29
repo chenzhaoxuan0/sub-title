@@ -185,6 +185,46 @@ class WslNanoService:
         )
         _wsl(f'{_ENV_PY} -c \'{patch_script}\'', timeout=60)
 
+    def _fix_flashinfer_link_libs(self, cuda_home: Optional[str] = None) -> None:
+        """补 flashinfer JIT 链接缺的 dev 库 symlink（修 'cannot find -lcudart/-lcuda'）。
+
+        症状：vLLM 0.26 + flashinfer 0.6.14 在 sampler 首次调用时 JIT 编译 sampling
+        kernel，ninja 链接命令硬编码 ``-L$CUDA_HOME/lib64 -L$CUDA_HOME/lib64/stubs
+        -lcudart -lcuda``。但 CUDA 13 这代 pip 包把运行时库放在 ``nvidia/cuXX/lib``
+        （没有 lib64 目录），只给 ``libcudart.so.13``（无 dev symlink ``libcudart.so``），
+        且整个 nvidia pip 包不提供 ``libcuda.so``（driver stub 只在 WSL 系统的
+        ``/usr/lib/wsl/lib``）。结果 ld 两个库都找不到 → sampling.so 编不出 →
+        EngineCore 崩 → ``Engine core initialization failed``。
+
+        修复：在 cuXX 下建 ``lib64/libcudart.so`` → ``../lib/libcudart.so.13``，
+        ``lib64/stubs/libcuda.so`` → ``/usr/lib/wsl/lib/libcuda.so``。
+        幂等：``ln -sf`` 覆盖已存在 symlink，已正确时无副作用。
+        """
+        cuda_home = cuda_home or self._resolve_cuda_home()
+        if not cuda_home:
+            logger.warning("未解析到 CUDA_HOME，跳过 flashinfer 链接库修复")
+            return
+        lib64 = f"{cuda_home}/lib64"
+        cudart_so = f"{lib64}/libcudart.so"
+        stubs_dir = f"{lib64}/stubs"
+        libcuda_so = f"{stubs_dir}/libcuda.so"
+        # 全程字面路径（不用 bash 的 $ 变量/$()——经 wsl.exe 命令行传递会被吞空，见 _wsl 注释）。
+        # ln 的 target 用相对路径：libcudart.so 在 lib64/，../lib/ 即 cuXX/lib/（实测有效）。
+        script = (
+            f'mkdir -p "{stubs_dir}" && '
+            f'ln -sf ../lib/libcudart.so.13 "{cudart_so}" && '
+            f'ln -sf /usr/lib/wsl/lib/libcuda.so "{libcuda_so}"'
+        )
+        try:
+            rc, _, err = _wsl(script, timeout=30)
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning("flashinfer 链接库修复异常: %s", e)
+            return
+        if rc != 0:
+            logger.warning(
+                "flashinfer 链接库 symlink 建立失败（rc=%s）: %s", rc, err.strip()[:200]
+            )
+
     # ------------------------------------------------------------------
     # 装环境（耗时几十分钟）
     # ------------------------------------------------------------------
@@ -254,10 +294,11 @@ class WslNanoService:
         # vLLM 的 nvidia-cuda-* 包版本常不统一（nvcc 13.3 vs runtime 13.0），会导致
         # flashinfer JIT 编译失败；统一版本 + patch flashinfer 用绝对路径调 ninja
         # （spawn 子进程 PATH 不含 conda bin）。详见 _fix_cuda_version_mismatch。
-        _say("修复 CUDA 版本冲突 + flashinfer ninja 路径…")
+        _say("修复 CUDA 版本冲突 + flashinfer ninja 路径 + JIT 链接库…")
         try:
             self._fix_cuda_version_mismatch()
             self._patch_flashinfer_ninja()
+            self._fix_flashinfer_link_libs()
         except Exception as e:
             logger.exception("CUDA/flashinfer 修复步骤异常（不阻断，启动时可能再报）")
         _say("依赖安装完成，环境就绪")
@@ -296,6 +337,10 @@ class WslNanoService:
         env_bin = f"{_CONDA_HOME}/envs/{_ENV_NAME}/bin"
         cuda_home = self._resolve_cuda_home()
         cuda_bin = f"{cuda_home}/bin" if cuda_home else ""
+        # 启动前补 flashinfer JIT 链接库 symlink（修 'cannot find -lcudart/-lcuda'，
+        # 详见 _fix_flashinfer_link_libs）。老环境（setup 时还没这步）启动时兜底补上，
+        # 幂等秒过；不补会导致 EngineCore 在 sampler JIT 链接阶段崩溃。
+        self._fix_flashinfer_link_libs(cuda_home)
         # 字面 PATH：环境 bin + cuda bin + 标准 PATH（不含 $PATH 展开）
         path_dirs = env_bin + (f":{cuda_bin}" if cuda_bin else "") + \
             ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -318,24 +363,41 @@ class WslNanoService:
             return False, f"启动失败: {err.strip()}"
 
         # 轮询端口（vLLM 加载模型慢；首次还需下模型 ~2GB，可能十几分钟）。
-        # 关键可见性：每轮顺带 tail 日志最后一行推给 UI，让用户看到 vLLM 真实进度
-        # （下载百分比 / 加载步骤 / JIT 编译 / 错误），而不是干等"启动中"。
+        # 关键可见性：每轮 tail 日志尾部推给 UI，让用户看到 vLLM 真实进度
+        # （下载百分比 / 加载步骤 / JIT 编译），而不是干等"启动中"。
+        # 致命错误识别：vLLM 崩溃会打固定标记（Engine core initialization failed /
+        # Ninja build failed / cannot find -l）。一旦命中，服务进程已死，继续轮询只会
+        # 死等到 30 分钟超时——立即判定失败、拉完整堆栈（root cause 在 RuntimeError
+        # 上方多行，tail -n 1 会漏掉）返回，避免"一直卡在启动中"。
         _say("等待 vLLM 加载模型（首次需下载模型，可能数分钟）…")
         import time
         last_tail = ""
+        fatal_markers = (
+            "Engine core initialization failed",
+            "Ninja build failed",
+            "cannot find -l",        # 链接缺库（本次根因：-lcudart/-lcuda 找不到）
+        )
         for _i in range(_STARTUP_POLL_MAX):
             if probe(_DEFAULT_HOST, port, timeout=1.0):
                 _say("服务就绪")
                 return True, ""
-            # tail 日志最后一行，有变化就推给 UI + 落日志文件（去掉进度条回车噪声）。
-            # 落日志文件是关键：即便 UI 关了，subtitle.log 也有完整 vLLM 输出，
-            # 出问题（如 Engine core initialization failed）能回溯到上面的 root cause。
-            _, tail_out, _ = _wsl(f"tail -n 1 {_LOG_FILE} 2>/dev/null | tr -d '\\r'", timeout=5)
-            tail_line = tail_out.strip()
+            # tail 一小段（8 行）做致命错误检测：root cause 常在 RuntimeError 上方，
+            # 只读最后一行会漏判（实测：最后一行是 RuntimeError，上方才是 cannot find -l）。
+            _, seg_out, _ = _wsl(f"tail -n 8 {_LOG_FILE} 2>/dev/null | tr -d '\\r'", timeout=5)
+            seg = seg_out.strip()
+            if any(m in seg for m in fatal_markers):
+                # 服务已崩：拉完整堆栈落日志 + 返回（root cause 在上方多行）
+                _, full_tail, _ = _wsl(f"tail -n 80 {_LOG_FILE} 2>/dev/null", timeout=10)
+                logger.error("[wsl-server] 启动失败（致命错误），日志尾部:\n%s", full_tail.strip())
+                return False, (
+                    "服务启动失败（vLLM 引擎初始化崩溃）。WSL 日志尾部：\n" + full_tail.strip()
+                )
+            # 正常进度：推最后一行给 UI + 落日志（截断防过长行刷屏）
+            tail_line = seg.splitlines()[-1] if seg else ""
             if tail_line and tail_line != last_tail:
                 last_tail = tail_line
                 logger.info("[wsl-server] %s", tail_line[:300])
-                _say(tail_line[:120])   # 截断防过长行刷屏（UI 短，日志长）
+                _say(tail_line[:120])
             time.sleep(_STARTUP_POLL_INTERVAL)
         # 超时：拉日志尾部帮排障
         _, log_tail, _ = _wsl(f"tail -n 20 {_LOG_FILE}", timeout=10)
