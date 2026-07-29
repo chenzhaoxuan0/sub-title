@@ -1,6 +1,7 @@
 """Fun-ASR-Nano segment engine for local Chinese, dialect, and lyric subtitles."""
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 import traceback
@@ -9,6 +10,12 @@ import numpy as np
 import soundfile as sf
 
 from .base import AsrEngine, OnResult
+
+logger = logging.getLogger(__name__)
+
+
+class NanoStreamingUnavailable(RuntimeError):
+    """流式服务不可用（连不上 / websockets 缺失），工厂据此降级段式。"""
 
 
 class FunAsrNanoEngine(AsrEngine):
@@ -33,9 +40,9 @@ class FunAsrNanoEngine(AsrEngine):
         device = resolve_device(getattr(self.cfg, "funasr_nano_device", "cuda"))
         seconds = float(getattr(self.cfg, "funasr_nano_segment_seconds", 2.0))
         self._segment_samples = max(1600, int(seconds * 16000))
-        print(f"[funasr_nano] 从 ModelScope 加载 {model_id} (device={device})...")
+        logger.info(f"从 ModelScope 加载 {model_id} (device={device})...")
         self.model = AutoModel(model=model_id, device=device, disable_update=True, hub="ms")
-        print(f"[funasr_nano] 就绪，段时长={seconds}s")
+        logger.info(f"就绪，段时长={seconds}s")
 
     def feed(self, chunk: np.ndarray) -> None:
         if self._closed or self.model is None:
@@ -75,8 +82,7 @@ class FunAsrNanoEngine(AsrEngine):
             if text:
                 self.on_result(text, is_final=True, source=self.source, spk_id=None)
         except Exception as error:
-            print(f"[funasr_nano] 推理异常: {error}")
-            traceback.print_exc()
+            logger.exception(f"推理异常: {error}")
         finally:
             if path:
                 try:

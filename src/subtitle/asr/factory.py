@@ -4,8 +4,12 @@
 """
 from __future__ import annotations
 
+import logging
+
 from .base import AsrEngine, OnResult
 from ._install import missing_dep_hint
+
+logger = logging.getLogger(__name__)
 
 
 def _missing_dep(engine_type: str) -> "str | None":
@@ -38,8 +42,8 @@ def create_engine(cfg, on_result: OnResult, source: str = "system") -> AsrEngine
     asr_cfg = cfg.asr.for_source(source)
     engine_type = getattr(asr_cfg, "engine_type", "funasr")
     if getattr(asr_cfg, "enable_speaker_diarization", False) and engine_type != "funasr":
-        print(
-            f"[factory:{source}] ⚠️ 说话人区分开启但引擎类型={engine_type} 不支持流式 spk_id，"
+        logger.warning(
+            f"说话人区分开启但引擎类型={engine_type} 不支持流式 spk_id，"
             f"本 session 降级为 funasr（请在设置里切引擎或关闭说话人区分）"
         )
         engine_type = "funasr"
@@ -58,6 +62,22 @@ def create_engine(cfg, on_result: OnResult, source: str = "system") -> AsrEngine
         return SenseVoiceEngine(asr_cfg, on_result, source=source)
 
     if engine_type == "funasr_nano":
+        # 流式模式：探测 WSL2 里的 realtime-server，连得上才造流式引擎；否则回退段式。
+        # 降级只作用于本次 session（不重写 config），与 diarization 降级模式一致。
+        mode = getattr(asr_cfg, "funasr_nano_mode", "segment")
+        if mode == "streaming":
+            from .funasr_nano_streaming_engine import probe
+            host = getattr(asr_cfg, "funasr_nano_streaming_host", "localhost")
+            port = int(getattr(asr_cfg, "funasr_nano_streaming_port", 10095))
+            if probe(host, port):
+                from .funasr_nano_streaming_engine import FunAsrNanoStreamingEngine
+                return FunAsrNanoStreamingEngine(asr_cfg, on_result, source=source)
+            logger.warning(
+                f"Nano 流式模式连不上 {host}:{port}"
+                f"（请先在 WSL2 起 funasr-realtime-server），本次回退段式"
+            )
+            # 标记运行期降级，供 app.py 在状态栏提示用户（不写 config）
+            asr_cfg._nano_streaming_fallback = True
         from .funasr_nano_engine import FunAsrNanoEngine
         return FunAsrNanoEngine(asr_cfg, on_result, source=source)
 
