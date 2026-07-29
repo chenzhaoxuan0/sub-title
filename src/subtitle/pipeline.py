@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Callable, Optional, Union
@@ -23,6 +24,8 @@ from .audio import SystemAudioCapture, MicrophoneCapture, normalize_pcm
 from .config import Config
 from .asr.base import AsrEngine
 from .asr.factory import create_engine
+
+logger = logging.getLogger(__name__)
 
 # 停止哨兵：塞进 queue 唤醒推理线程的 get，让它立刻退出循环
 _STOP_SENTINEL = object()
@@ -52,7 +55,7 @@ class SubtitlePipeline:
         self.cfg = cfg
         self.engine = engine
         self.on_text = on_text or (lambda t, f, s, spk: print(t, end="", flush=True))
-        self.on_error = on_error or (lambda m: print(f"[pipeline:{source}] {m}"))
+        self.on_error = on_error or (lambda m: logger.error(m))
         self.on_audio_level = on_audio_level or (lambda rms, peak, s: None)
 
         self.source = source                  # 来源标签，随回调透传（"system" / "mic"）
@@ -110,7 +113,7 @@ class SubtitlePipeline:
         if self._infer_thread is not None:
             self._infer_thread.join(timeout=10)
             if self._infer_thread.is_alive():
-                print(f"[pipeline:{self.source}] 警告：推理线程 10s 后仍未退出（engine.stop 可能卡住）")
+                logger.warning(f"推理线程 10s 后仍未退出（engine.stop 可能卡住）")
         # 清理本地状态
         self._buf = np.zeros(0, dtype=np.float32)
 
@@ -161,7 +164,7 @@ class SubtitlePipeline:
             try:
                 self.engine.stop()
             except Exception as e:
-                print(f"[pipeline:{src}] engine.stop 异常: {e}")
+                logger.exception(f"engine.stop 异常: {e}")
             # 停采集线程并等它退出
             if cap is not None:
                 cap.stop()
@@ -171,4 +174,4 @@ class SubtitlePipeline:
         try:
             self.engine.feed(block)
         except Exception as e:
-            print(f"[pipeline:{self.source}] engine.feed 异常: {e}")
+            logger.exception(f"engine.feed 异常: {e}")

@@ -10,11 +10,14 @@ stop 后置 _closed；feed 直接返回。
 """
 from __future__ import annotations
 
+import logging
 import re
 
 import numpy as np
 
 from .base import AsrEngine, OnResult
+
+logger = logging.getLogger(__name__)
 
 
 _TAG_RE = re.compile(r"<\|[^|]*\|>")
@@ -45,7 +48,7 @@ class SenseVoiceEngine(AsrEngine):
         from ._device import resolve_device
         device = resolve_device(getattr(self.cfg, "sensevoice_device", "cpu"))
         seg_sec = getattr(self.cfg, "sensevoice_segment_seconds", 2.0)
-        print(f"[sensevoice] 加载 {model_id} (device={device})，首次会下载(~254MB)...")
+        logger.info(f"加载 {model_id} (device={device})，首次会下载(~254MB)...")
         self.model = AutoModel(
             model=model_id,
             trust_remote_code=True,
@@ -55,7 +58,7 @@ class SenseVoiceEngine(AsrEngine):
             hub="ms",
         )
         self._segment_samples = int(seg_sec * 16000)
-        print(f"[sensevoice] 就绪，段时长={seg_sec}s（CPU/段式，延迟略高于流式）")
+        logger.info(f"就绪，段时长={seg_sec}s（CPU/段式，延迟略高于流式）")
 
     def feed(self, chunk: np.ndarray) -> None:
         if self._closed or self.model is None:
@@ -101,7 +104,7 @@ class SenseVoiceEngine(AsrEngine):
                     # SenseVoice 架构不支持说话人区分，spk_id 永远传 None
                     self.on_result(text, is_final=True, source=self.source, spk_id=None)
         except Exception as e:
-            print(f"[sensevoice] 推理异常: {e}")
+            logger.exception(f"推理异常: {e}")
             # buf 已在开头清空，状态一致
 
     def stop(self) -> None:

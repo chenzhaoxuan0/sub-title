@@ -19,10 +19,14 @@ faster-whisper 无原生流式（transcribe 是批处理），这是社区通用
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 from .base import AsrEngine, OnResult
 from .modelscope_hub import download_modelscope
+
+logger = logging.getLogger(__name__)
 
 
 _MODELSCOPE_MODEL_IDS = {
@@ -77,7 +81,7 @@ class FasterWhisperEngine(AsrEngine):
         if model_name == "large-v3-turbo":
             # ModelScope has no CTranslate2 turbo repository. Preserve old
             # configs without bypassing the ModelScope-only policy.
-            print("[faster_whisper] large-v3-turbo 在 ModelScope 不可用，已使用 large-v3。")
+            logger.info("large-v3-turbo 在 ModelScope 不可用，已使用 large-v3。")
             model_name = "large-v3"
         model_id = _MODELSCOPE_MODEL_IDS.get(model_name)
         if not model_id:
@@ -85,8 +89,8 @@ class FasterWhisperEngine(AsrEngine):
                 f"faster-whisper 模型 {model_name!r} 不支持 ModelScope 下载。"
                 f"可选：{', '.join(_MODELSCOPE_MODEL_IDS)}"
             )
-        print(f"[faster_whisper] 从 ModelScope 下载并加载 {model_id} (device={device}, "
-              f"compute_type={compute_type})...")
+        logger.info(f"从 ModelScope 下载并加载 {model_id} (device={device}, "
+                    f"compute_type={compute_type})...")
         model_path = download_modelscope(model_id, "faster-whisper")
         self.model = WhisperModel(
             model_size_or_path=model_path,
@@ -94,7 +98,7 @@ class FasterWhisperEngine(AsrEngine):
             compute_type=compute_type,
         )
         self._segment_samples = int(seg_sec * 16000)
-        print(f"[faster_whisper] 就绪，段时长={seg_sec}s beam_size={self._beam_size}")
+        logger.info(f"就绪，段时长={seg_sec}s beam_size={self._beam_size}")
 
     def feed(self, chunk: np.ndarray) -> None:
         if self._closed or self.model is None:
@@ -145,7 +149,7 @@ class FasterWhisperEngine(AsrEngine):
                 # faster-whisper 段式 + 不接 diarization 管线，spk_id 永远 None
                 self.on_result(text, is_final=True, source=self.source, spk_id=None)
         except Exception as e:
-            print(f"[faster_whisper] 推理异常: {e}")
+            logger.exception(f"推理异常: {e}")
             # buf 已在开头清空，状态一致；下一帧继续
 
     def stop(self) -> None:

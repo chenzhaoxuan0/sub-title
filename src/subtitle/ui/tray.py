@@ -187,6 +187,11 @@ class TrayController(QObject):
         self.act_settings.triggered.connect(self.settings_requested.emit)
         self._menu.addAction(self.act_settings)
 
+        # ---- 打开日志（出问题时直接看 subtitle.log，含 WSL/vLLM 完整输出）----
+        self.act_log = QAction("  📄  打开日志文件…", self._menu)
+        self.act_log.triggered.connect(self._open_log)
+        self._menu.addAction(self.act_log)
+
         self._menu.addSeparator()
 
         # ---- 退出 ----
@@ -195,6 +200,24 @@ class TrayController(QObject):
         self._menu.addAction(self.act_quit)
 
         self.tray.setContextMenu(self._menu)
+
+    def _open_log(self):
+        """用系统默认程序打开日志文件（跨平台）。"""
+        import os, sys, subprocess, logging
+        from ..logging_setup import log_file_path
+        path = log_file_path()
+        try:
+            # 日志文件可能还没生成（启动早期），touch 一下确保存在
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(path)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(path)], check=False)
+        except Exception:
+            logging.getLogger(__name__).exception("打开日志文件失败: %s", path)
 
     def _rebuild_theme_submenu(self):
         """重建主题子菜单（主题列表可能变化）。"""
