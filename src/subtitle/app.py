@@ -523,14 +523,21 @@ class SubtitleApp:
             self._stop()
         except Exception as e:
             logger.exception("退出时 _stop 异常")
-        # 关掉 WSL 里的 nano 流式服务，释放被 vLLM 占住的显存（约 13GB）。
-        # 必须在 _force_exit (os._exit) 之前同步执行，否则进程被强杀来不及清理。
-        # 仅当当前用过流式模式才需要停（没起过服务时 stop_server 是空操作，开销极小）。
+        # 释放被 WSL 里 nano 流式 vLLM 占住的显存（约 13GB）。必须在 _force_exit
+        # (os._exit) 之前发信号，否则进程被强杀来不及清理。
+        # 用 SIGINT 优雅退出（不关 WSL）：SIGINT 走 asyncio 取消 → vLLM 对象 GC →
+        # EngineCore shutdown → 释放 CUDA context。只发信号立即返回，WSL 进程异步退出
+        # （1-3 分钟），不阻塞本进程退出。只在本次确实用过流式 nano（显存被大量占用
+        # >8GB）时才发；没用过时显存仅桌面 ~2-4GB，跳过，不动 WSL。万一 SIGINT 没释放
+        # 干净（进程卡死等），下次 start_server 的幽灵检测会提示 wsl --shutdown。
         try:
             from .asr.wsl_nano_service import WslNanoService
-            WslNanoService().stop_server()
+            svc = WslNanoService()
+            if svc.gpu_mem_heavily_used():
+                logger.info("退出：检测到流式 nano 显存占用，发 SIGINT 让 vLLM 优雅退出释放")
+                svc.request_graceful_shutdown()
         except Exception as e:
-            logger.exception("退出时停 WSL 服务异常")
+            logger.exception("退出时清理 WSL nano 异常")
         self.skin_runtime.disable()
         self._save_config()
         # 显式关闭所有顶层窗口（panel + 非模态设置/皮肤编辑器）。
@@ -550,6 +557,20 @@ class SubtitleApp:
         self.panel.show()
         self.tray.show()
         self.tray.notify("sub-title", "已启动，右键托盘图标查看菜单")
+        # Ctrl+C（SIGINT）兜底：默认 Python 收到 SIGINT 会抛 KeyboardInterrupt 直接
+        # 中断，不走 _quit → 不停 WSL 里的 vLLM → 显存泄漏。这里捕获后转交 _quit
+        # （含 stop_server 释放显存）。signal handler 里不能直接操作 Qt 对象，用
+        # singleShot 排到事件循环主线程执行。SIGTERM 在 Windows 基本不会触发，顺带
+        # 注册以防部分环境。aboutToQuit → os._exit 跳过 atexit，所以必须靠 _quit 同步清理。
+        import signal
+        from PySide6.QtCore import QTimer
+        def _sig_to_quit(*_):
+            QTimer.singleShot(0, self._quit)
+        for _sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                signal.signal(_sig, _sig_to_quit)
+            except (ValueError, OSError):
+                pass  # 非主线程或信号不可注册
         # 兜底：Qt 事件循环退出后，若后台 C 扩展线程（soundcard WASAPI /
         # faster-whisper CUDA）卡住导致 sys.exit 无法正常返回，这里强制结束进程，
         # 保证「托盘退出 / 工具栏 X 退出 / Ctrl+C」都能让窗口 + 命令行黑框一起消失。

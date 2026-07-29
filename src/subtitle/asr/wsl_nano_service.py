@@ -43,6 +43,13 @@ _DEFAULT_HOST = "localhost"                         # WSL2 localhost 转发到 W
 _STARTUP_POLL_MAX = 900                             # 轮询次数：900 × 2s = 30 分钟（首次要下模型 ~2GB + vLLM 加载，3 分钟不够）
 _STARTUP_POLL_INTERVAL = 2.0
 
+# vLLM 显存预算：按用户 GPU 总显存自适应 gpu-memory-utilization，避免硬编码比例
+# 导致大显存卡（24GB）被预分配十几 GB KV cache 浪费、小显存卡（8GB）被撑爆。
+# 按"绝对预算"反推 utilization——字幕是单路场景，只需权重 + 少量 KV cache 余量。
+_VLLM_MEM_BUDGET_GIB = 4.0    # vLLM 目标总显存（权重1.7 + KV余量~2.3，单路足够）
+_VLLM_MEM_UTIL_MIN = 0.2      # utilization 下限（保证 vLLM 最小 KV cache，太低启动失败）
+_VLLM_MEM_UTIL_MAX = 0.6      # utilization 上限（小显存卡别撑爆，留给桌面/其他程序）
+
 ProgressCb = Callable[[str], None]
 
 
@@ -325,6 +332,19 @@ class WslNanoService:
         if not self._env_ready():
             return False, "WSL 环境未就绪，请先点「安装 WSL 环境」"
 
+        # 启动前清理上次没干净退出的残留实例：vLLM 崩溃/异常退出会留 EngineCore 孤儿
+        # 进程占显存，不清会和本次新实例叠加（两实例各抢 0.8 显存 → OOM/卡死）。
+        self.stop_server()
+        # 幽灵显存检测：WSL2 下 vLLM 异常退出可能不释放显存（进程已没但显存空占），
+        # 此时新实例会 OOM 起不来——只能 wsl --shutdown 重置，程序内无法修，提示用户。
+        mem_used = self._gpu_mem_used_mib()
+        if mem_used > 8000:
+            return False, (
+                f"GPU 显存已被占用约 {mem_used}MB 但无服务进程在跑——\n"
+                "这是 WSL2 显存泄漏（上次 vLLM 异常退出未释放）。\n"
+                "请在命令行执行 `wsl --shutdown` 重置 WSL 后重新启动。"
+            )
+
         # nohup 后台起服务：立即返回（&），日志重定向，stdin 接 /dev/null（否则后台
         # 进程可能因等 stdin 阻塞）。PID 用 pgrep 抓（$! 在 wsl bash -lc 下不可靠，
         # 实测抓到空值），写入 _PID_FILE 供 stop_server 精确停止。
@@ -347,10 +367,16 @@ class WslNanoService:
         env_prefix = f'export PATH="{path_dirs}"; '
         if cuda_home:
             env_prefix += f'export CUDA_HOME="{cuda_home}"; '
+        # gpu-memory-utilization 按用户 GPU 总显存自适应（_resolve_gpu_mem_util），
+        # 控制总显存占用 ~4GB，而非固定 0.8（会预分配十几 GB KV cache 浪费）。
+        gpu_util = self._resolve_gpu_mem_util()
+        _say(f"GPU 显存预算：utilization={gpu_util}（按总显存自适应）")
+        logger.info("[wsl-server] gpu-memory-utilization=%s（目标 ~%.1fGiB）",
+                    gpu_util, _VLLM_MEM_BUDGET_GIB)
         script = (
             f"{env_prefix}"
             f"nohup {_ENV_FUNASR_RT} --endpoint-mode client --port {port} "
-            f'--language "{language}" --dtype bf16 --gpu-memory-utilization 0.8 '
+            f'--language "{language}" --dtype bf16 --gpu-memory-utilization {gpu_util} '
             f"> {_LOG_FILE} 2>&1 < /dev/null & "
             # 等进程名出现后用 pgrep 抓 PID（比 $! 可靠）
             f"sleep 1; pgrep -f funasr-realtime-server | head -1 > {_PID_FILE}"
@@ -409,31 +435,138 @@ class WslNanoService:
     # ------------------------------------------------------------------
     # 停服务
     # ------------------------------------------------------------------
-    def stop_server(self) -> bool:
-        """停掉 WSL 里的 funasr-realtime-server，释放显存。
+    def _gpu_mem_used_mib(self) -> int:
+        """查 GPU 已用显存（MiB）。WSL 内 nvidia-smi 查询，失败返回 -1。
 
-        优先用 PID 文件精确 kill；文件不在就 pkill 按进程名兜底。
-        幂等：没在跑也返回 True。在 app._quit() 同步调用（os._exit 之前）。
+        用于 start_server 的幽灵显存检测：进程都没了但显存仍高 → WSL2 泄漏。
         """
-        # 优先精确 kill：用 xargs 把 PID 文件内容喂给 kill，避免 $(cat $PID) 的 $ 被
-        # wsl.exe 命令行传递层吞空。
-        script = (
-            f'[ -f {_PID_FILE} ] && cat {_PID_FILE} | xargs -r kill 2>/dev/null; '
-            f"rm -f {_PID_FILE}"
+        rc, out, _ = _wsl(
+            "/usr/lib/wsl/lib/nvidia-smi --query-gpu=memory.used "
+            "--format=csv,noheader,nounits 2>/dev/null",
+            timeout=10,
         )
         try:
-            _wsl(script, timeout=15)
-        except (subprocess.SubprocessError, OSError):
-            pass
-        # 兜底：按进程名清残留
+            return int(out.strip().splitlines()[0])
+        except (ValueError, IndexError):
+            return -1
+
+    def _gpu_total_mib(self) -> int:
+        """查 GPU 总显存（MiB）。WSL 内 nvidia-smi 查询，失败返回 -1。"""
+        rc, out, _ = _wsl(
+            "/usr/lib/wsl/lib/nvidia-smi --query-gpu=memory.total "
+            "--format=csv,noheader,nounits 2>/dev/null",
+            timeout=10,
+        )
         try:
-            _wsl("pkill -f funasr-realtime-server", timeout=15)
+            return int(out.strip().splitlines()[0])
+        except (ValueError, IndexError):
+            return -1
+
+    def _resolve_gpu_mem_util(self) -> float:
+        """按 GPU 总显存自适应算 gpu-memory-utilization，控制 vLLM 总显存占用。
+
+        问题：硬编码 utilization（如 0.8）对不同显存卡效果差异大——vLLM 按比例预分配
+        KV cache，24GB 卡会占 ~19GB（浪费十几个 GB）、8GB 卡占 ~6GB（接近撑爆）。字幕是
+        单路场景，实际只需权重(~1.7GB) + 少量 KV cache。
+
+        方案：按"绝对预算"（_VLLM_MEM_BUDGET_GIB，默认 4GB）反推 utilization，clamp 到
+        [_VLLM_MEM_UTIL_MIN, _VLLM_MEM_UTIL_MAX]：
+          - 16GB → 4/16=0.25（占 ~4GB，单路余量充足）
+          - 8GB  → 4/8=0.50（占 ~4GB）
+          - 24GB → 4/24=0.17→clamp 0.20（占 ~4.8GB，不浪费）
+          - 6GB  → 4/6=0.67→clamp 0.60（占 ~3.6GB，权重1.7+KV1.9 仍够单路）
+        查不到总显存时保守返回 0.3。
+        """
+        total_mib = self._gpu_total_mib()
+        if total_mib <= 0:
+            return 0.3
+        util = (_VLLM_MEM_BUDGET_GIB * 1024) / total_mib
+        return round(max(_VLLM_MEM_UTIL_MIN, min(_VLLM_MEM_UTIL_MAX, util)), 2)
+
+    def stop_server(self) -> bool:
+        """停掉 WSL 里的 funasr-realtime-server 及其子进程，释放显存。
+
+        两阶段杀，确保杀干净整个进程树。直接 kill 主进程会漏掉 vLLM spawn 出来的
+        EngineCore 子进程——它持有显存、命令行不含 ``funasr[-]realtime-server``，
+        成孤儿后在 WSL2 下变成"幽灵显存"（进程没了但显存空占，只能 wsl --shutdown 回收）：
+
+          1. SIGTERM 主进程（PID 文件 + 进程名）：给 vLLM 优雅退出、主动释放显存的机会；
+          2. 等 ~2s 后 SIGKILL 兜底：杀该 conda 环境所有残留 python（EngineCore spawn
+             子进程 + multiprocessing resource_tracker 孤儿——命令行都含
+             ``subtitle-nano/bin/python``，第一步杀不到）。
+
+        字符类 ``[-]`` 防 pkill 自杀：``pkill -f X[-]Y`` 执行时，bash 命令行字面含
+        ``X[-]Y``，正则 ``[-]`` 只匹配 ``-``、遇到 ``[`` 失配 → 不杀自己；而真进程
+        命令行是 ``X-Y``，匹配。（脚本内绝不出现无方括号形式，否则会自杀。）
+
+        幂等：没在跑也返回 True。设置面板「停止」按钮（_WslServerWorker）调用；app._quit
+        改走 shutdown_wsl——杀进程不释放 WSL2 显存，只有 wsl --shutdown 能释放。
+        """
+        import time
+        # 1) SIGTERM 主进程：PID 文件精确 kill（xargs 喂 PID，避免 $(cat) 的 $ 被吞空）
+        #    + 进程名兜底（字符类防 pkill 自杀）。
+        script_term = (
+            f'[ -f {_PID_FILE} ] && cat {_PID_FILE} | xargs -r kill 2>/dev/null; '
+            f"rm -f {_PID_FILE}; "
+            f"pkill -TERM -f 'funasr[-]realtime-server' 2>/dev/null; true"
+        )
+        try:
+            _wsl(script_term, timeout=15)
         except (subprocess.SubprocessError, OSError):
             pass
-        # 验证端口已关（给一点时间释放）
-        import time
+        # 给 vLLM 优雅退出、释放 EngineCore 显存的时间
+        time.sleep(2.0)
+        # 2) SIGKILL 兜底：杀该环境所有残留 python（EngineCore + resource_tracker 孤儿）。
+        #    专用环境 subtitle-nano，误杀风险极低；不杀会留幽灵显存。
+        try:
+            _wsl("pkill -9 -f 'subtitle[-]nano/bin/python' 2>/dev/null; true", timeout=15)
+        except (subprocess.SubprocessError, OSError):
+            pass
+        # 3) 验证端口已关（再给点时间释放）
         for _ in range(10):
             if not probe(_DEFAULT_HOST, self._port(), timeout=0.5):
                 return True
             time.sleep(0.3)
         return not probe(_DEFAULT_HOST, self._port(), timeout=0.5)
+
+    def gpu_mem_heavily_used(self) -> bool:
+        """GPU 显存是否被大量占用（>8GB）——判断本次是否用过流式 nano。
+
+        流式 nano 占约 13GB；没用过时仅桌面占用 ~2-4GB。用于 app._quit 决定是否
+        需要 wsl --shutdown 释放显存（没用过就不关 WSL，避免殃及用户其他 WSL 工作）。
+        """
+        return self._gpu_mem_used_mib() > 8000
+
+    def shutdown_wsl(self) -> None:
+        """wsl --shutdown：关闭整个 WSL 虚拟机，强制回收全部 GPU 显存（强制兜底）。
+
+        100% 可靠释放，但代价大：关闭所有 WSL 发行版的所有进程（殃及用户其他 WSL
+        程序），且反复重启会劣化 GPU 状态（init 越来越慢/卡）。
+
+        日常退出用 request_graceful_shutdown（SIGINT 优雅退出，不关 WSL）；本方法仅在
+        SIGINT 无效（进程卡死、显存幽灵不释放）时作为强制兜底——由 start_server 的
+        幽灵显存检测提示用户手动执行 ``wsl --shutdown``，不自动调用。
+        """
+        try:
+            subprocess.run(["wsl.exe", "--shutdown"], timeout=30)
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning("wsl --shutdown 失败: %s", e)
+
+    def request_graceful_shutdown(self) -> None:
+        """发 SIGINT 让 funasr-realtime-server 优雅退出，释放显存（不关 WSL、不阻塞）。
+
+        SIGINT 走 asyncio 取消路径 → 主进程优雅 unwind → 全局 vllm_engine 被 GC →
+        EngineCoreClient.shutdown() → EngineCore 子进程 cleanup 释放 CUDA context →
+        显存释放（实测 1-3 分钟内完成，15623→2189 MiB）。
+
+        对比 SIGTERM（主进程直接终止、不跑 GC → 显存幽灵）与 wsl --shutdown（100%
+        可靠但关整个 WSL）。本方法只发信号立即返回，WSL 进程异步退出，不阻塞调用方
+        （app._quit 发完即 os._exit）。局限：退出慢（1-3 分钟）；对卡死进程可能无效
+        ——万一没释放干净，下次 start_server 的幽灵检测会提示 wsl --shutdown。
+
+        字符类 ``[-]`` 防 pkill 自杀（见 stop_server 同名注释）。
+        """
+        try:
+            _wsl("pkill -INT -f 'funasr[-]realtime-server' 2>/dev/null; true", timeout=15)
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning("发 SIGINT 优雅退出失败: %s", e)
