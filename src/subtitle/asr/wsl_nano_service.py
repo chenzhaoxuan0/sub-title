@@ -142,6 +142,49 @@ class WslNanoService:
         dirs = [d.strip() for d in out.strip().splitlines() if d.strip()]
         return dirs[-1] if dirs else ""
 
+    def _fix_cuda_version_mismatch(self) -> None:
+        """统一 nvidia-cuda-* 包版本，修 flashinfer JIT 编译时的版本冲突。
+
+        症状：vLLM 装完后 nvidia-cuda-nvcc 是 13.3，但 runtime/cupti/nvrtc 是 13.0，
+        flashinfer JIT 编译 sampling kernel 时报 "CUDA compiler and CUDA toolkit
+        headers are incompatible"。这里把 runtime/nvrtc/cupti 升到和 nvcc 同一版本系列。
+        幂等：已统一时 pip 跳过。
+        """
+        logger.info("统一 nvidia-cuda-* 包版本（修 flashinfer JIT 编译冲突）…")
+        # 和 nvcc(13.3.x) 同系列的 runtime/nvrtc/cupti；版本号查证自 PyPI 可用版本
+        _wsl(
+            f"{_ENV_PY} -m pip install -q "
+            '"nvidia-cuda-runtime==13.3.29" '
+            '"nvidia-cuda-nvrtc==13.3.33" '
+            '"nvidia-cuda-cupti==13.3.75"',
+            timeout=600,
+        )
+
+    def _patch_flashinfer_ninja(self) -> None:
+        """patch flashinfer 的 run_ninja 用绝对路径调 ninja。
+
+        症状：vLLM spawn 的 EngineCore 子进程 PATH 没含 conda bin，flashinfer
+        subprocess.run(["ninja", ...]) 找不到 ninja（FileNotFoundError: 'ninja'）。
+        把 "ninja" 换成绝对路径彻底绕开 PATH 继承问题。幂等：已 patch 跳过。
+        """
+        target = (f"{_CONDA_HOME}/envs/{_ENV_NAME}/lib/python3.11/site-packages/"
+                  "flashinfer/jit/cpp_ext.py")
+        # 下载一个 patch 脚本到 WSL 执行（避免 $ 转义地狱）。脚本做：
+        # 找 run_ninja 里 command = [\n        "ninja", → 换成绝对路径。
+        patch_script = (
+            'import shutil,re\n'
+            f'tgt="{target}"\n'
+            'n=shutil.which("ninja")\n'
+            'if not n: exit(0)\n'
+            's=open(tgt).read()\n'
+            'if n in s: exit(0)\n'   # 已 patch
+            'm=re.search(r"(def run_ninja.*?command = \\[\\n\\s*)\\"ninja\\"",s,re.DOTALL)\n'
+            'if m:\n'
+            '  s=s[:m.end()-8]+n+s[m.end():]\n'
+            '  open(tgt,"w").write(s)\n'
+        )
+        _wsl(f'{_ENV_PY} -c \'{patch_script}\'', timeout=60)
+
     # ------------------------------------------------------------------
     # 装环境（耗时几十分钟）
     # ------------------------------------------------------------------
@@ -208,6 +251,15 @@ class WslNanoService:
         )
         if rc != 0:
             return False, f"安装依赖失败: {err.strip() or out.strip()[:500]}"
+        # vLLM 的 nvidia-cuda-* 包版本常不统一（nvcc 13.3 vs runtime 13.0），会导致
+        # flashinfer JIT 编译失败；统一版本 + patch flashinfer 用绝对路径调 ninja
+        # （spawn 子进程 PATH 不含 conda bin）。详见 _fix_cuda_version_mismatch。
+        _say("修复 CUDA 版本冲突 + flashinfer ninja 路径…")
+        try:
+            self._fix_cuda_version_mismatch()
+            self._patch_flashinfer_ninja()
+        except Exception as e:
+            logger.exception("CUDA/flashinfer 修复步骤异常（不阻断，启动时可能再报）")
         _say("依赖安装完成，环境就绪")
         return True, ""
 
