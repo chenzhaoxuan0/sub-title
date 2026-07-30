@@ -2020,3 +2020,9 @@ class SettingsDialog(QDialog):
         p._notify_geometry()
         self._update_recog_buttons()
         self.accept()
+
+    def reject(self) -> None:
+        # Close 按钮也应用设置：用户改了配置后直接关闭应生效，不必强制点 Apply
+        # （funasr nano 的「退出时关闭 WSL」等开关尤其依赖此行为，否则改了不生效）。
+        # _on_apply 结尾会 accept → 以 accepted 状态关闭，等价"应用 + 关闭"。
+        self._on_apply()

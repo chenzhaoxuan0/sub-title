@@ -301,6 +301,10 @@ class SubtitlePanel(QWidget):
         # 段尾换行要等下一条非空字幕到来时才实际插入，否则 QTextDocument 会保留
         # 一个空白末段，滚动到底后最后一条字幕会被顶到倒数第二行。
         self._deferred_line_break = False
+        # interim 覆盖：按 (source, spk_id) 维护"当前未定稿的中间结果"在文档里的绝对
+        # 位置区间 [start, end)（QChar 单位）。partial 覆盖它（实时逐字 + 跨次纠错），
+        # final 定稿（清区间，文本永久）。详见 _insert_item。
+        self._interim: dict[tuple[str, object], tuple[int, int]] = {}
 
         self._init_window_flags()
         self._init_ui()
@@ -989,70 +993,46 @@ class SubtitlePanel(QWidget):
             self._flush_timer.start()
 
     def _flush_pending_text(self):
-        """定时器到点：把累积的文本一次性插入文档（按到达顺序逐条插入）。"""
+        """定时器到点：把累积的文本一次性插入文档（interim 覆盖语义）。
+
+        is_final=False（partial，当前句完整中间文本）覆盖当前 interim 区间（实时逐字
+        + 跨次纠错），is_final=True（final）定稿（清区间、文本永久）。按 (source, spk_id)
+        维护多条 interim，支持双源/多说话人交错。详见 _insert_item。
+        """
         if not self._pending:
             return
         items = self._pending
         self._pending = []
-        # 合并同源 + 同 spk_id 的连续片段以减少富文本碎片
-        # （不同 spk 切到不同人时不要合并，颜色/前缀会变）
+        # 合并：同 (source, spk_id) 且都 is_final=False 的连续项只保留最后一条（累积型
+        # partial，最后者最全；原"拼接"在覆盖语义下会堆积）。其余不合并（各自独立处理）。
         merged: list[tuple[str, bool, str, object]] = []
         for text, is_final, source, spk_id in items:
             if (
                 merged
                 and merged[-1][2] == source
-                and merged[-1][1] == is_final
                 and merged[-1][3] == spk_id
+                and not is_final
+                and not merged[-1][1]
             ):
-                mt, mf, ms, mk = merged[-1]
-                merged[-1] = (mt + text, mf, ms, mk)
+                merged[-1] = (text, is_final, source, spk_id)   # partial: 后者覆盖前者
             else:
                 merged.append((text, is_final, source, spk_id))
-        # 自动分行：对每条文本过 line_breaker（按句末标点或引擎边界插 \n）。
-        # line_breaker 返回的字符串里 \n 是唯一的换行标记；按 \n split 成若干段，
-        # 每段一个彩色 span，段间用纯文本 \n 换行（避免 insertHtml 吞 <br>）。
-        # 段尾换行延迟到下一条字幕前插入，避免文档末尾留下空白行。
+
         bar = self.view.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - bar.singleStep()
         saved_pos = bar.value()
-        cursor = QTextCursor(self.view.document())
-        cursor.movePosition(QTextCursor.End)
+        doc = self.view.document()
+        cursor = QTextCursor(doc)
         cursor.beginEditBlock()
         for text, is_final, source, spk_id in merged:
             if not text:
                 continue
-            processed = self._line_breaker.feed(text, is_final)
-            if not processed:
-                continue
-            if self._deferred_line_break:
-                cursor.insertText("\n")
-                self._deferred_line_break = False
-            ends_with_break = processed.endswith("\n")
-            if ends_with_break:
-                processed = processed[:-1]
-            segments = processed.split("\n")
-            color = self._source_style(source)
-            prefix = self._speaker_prefix(source, spk_id)
-            # 来源图标（🔊/🎤）已移除：QTextCursor.insertHtml 对 emoji（surrogate
-            # pair 码点 U+1F50A）的富文本解析有缺陷，funasr 流式高频回调时反复
-            # insert 富文本会把 emoji 之后的内容吞掉/错位，导致字幕文字被截断。
-            # 来源改用颜色区分（mic 用 mic_color，system 用主题文本色），不再加图标。
-            # 说话人 [显示名] 前缀是纯文本，保留并在句首显示一次。
-            prefix_emitted = False
-            for i, seg in enumerate(segments):
-                if i > 0:
-                    cursor.insertText("\n")
-                if seg:
-                    this_prefix = prefix if not prefix_emitted else ""
-                    prefix_emitted = True
-                    safe = html.escape(seg)
-                    cursor.insertHtml(
-                        f'<span style="color:{color};">{this_prefix}{safe}</span>'
-                    )
-            self._deferred_line_break = ends_with_break
+            # commit=False=partial（写回区间，下次覆盖）；True=final（定稿不写回）
+            self._insert_item(cursor, doc, source, spk_id, text, is_final,
+                              commit=is_final)
             self._trim_if_needed()
         cursor.endEditBlock()
-        # 锁定模式：强制跟到底
+        # 滚动锚定（原样）
         if getattr(self.ui_cfg, "lock_scroll_to_bottom", False):
             bar.setValue(bar.maximum())
         elif at_bottom:
@@ -1061,6 +1041,98 @@ class SubtitlePanel(QWidget):
             bar.setValue(saved_pos)
         if not self._grabbing_skin_background:
             self.preview_state_changed.emit()
+
+    def _doc_end(self, doc) -> int:
+        """文档最后一个可插入位置（characterCount 含末尾 block 分隔符，-1）。"""
+        return doc.characterCount() - 1
+
+    def _shift_after(self, boundary_pos: int, delta: int) -> None:
+        """boundary_pos 之后的 interim 区间整体 +delta。
+
+        用于中间 interim 覆盖后其后方区间平移（删旧插新净变化 delta）。基于旧坐标
+        +delta = 新坐标（其它 key 的旧坐标在本次删/插后净偏移正好是 delta）。
+        """
+        if delta == 0:
+            return
+        for key, (s, e) in list(self._interim.items()):
+            if s >= boundary_pos:
+                self._interim[key] = (s + delta, e + delta)
+
+    def _insert_item(self, cursor, doc, source, spk_id, text, is_final, commit: bool) -> None:
+        """把一条文本插入文档：命中 interim 区间则覆盖，否则追加。
+
+        commit=False（partial）：插入后把新区间写回 _interim[key]，下次同 key partial
+        覆盖它（实时逐字 + 跨次纠错）。
+        commit=True（final）：同样覆盖原区间（权威文本替换临时），但**不写回**→区间清空、
+        文本永久；该 key 下条 partial 命中不到 → 走追加起新行。
+
+        用 cursor.position() 在 insertHtml 前后快照记录区间（避 len(text)≠QChar 数陷阱：
+        span 颜色不占字符位；项目禁 emoji，partial 全 BMP）。is_endmost 必须在删旧区间
+        之前判（删完 characterCount 已变）。deferred_line_break 规则：尾换行落在末尾→
+        deferred，落在中间→立即落盘（不动 deferred，它属于末尾别的 key）。
+        """
+        key = (source, spk_id)
+        # partial（commit=False）**不过 LineBreaker**：当前句保持单段，避免标点断成多段
+        # 导致覆盖时段数变化、位置跳动（用户反馈"最后一句跳到上一行"——partial 含句号
+        # 时断成多行，新增内容把前段顶到上一行）。超长由 QTextEdit 自动软换行（视觉换行，
+        # 不改文档段落，不跳）。final（commit=True）过 LineBreaker：定稿句按标点分历史
+        # 多行 + 尾换行（定稿一次性，跳一次可接受）。布局：partial 独占最后一行实时纠错，
+        # 定稿后该文本留在原位成为历史行、新 partial 另起一行。
+        if commit:
+            processed = self._line_breaker.feed(text, is_final)
+        else:
+            processed = text or ""
+        ends_with_break = processed.endswith("\n")
+        if ends_with_break:
+            processed = processed[:-1]
+        segments = processed.split("\n")
+        color = self._source_style(source)
+        prefix = self._speaker_prefix(source, spk_id)
+
+        rng = self._interim.get(key)
+        if rng is not None:
+            # 覆盖路径：删旧 interim，原地重插
+            start, end = rng
+            is_endmost = (end == self._doc_end(doc))   # 删前判（删完 characterCount 已变）
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()                # cursor 塌缩到 start
+            cursor.setPosition(start)
+            materialize_trailing = ends_with_break and not is_endmost
+        else:
+            # 追加路径：到末尾，先补 deferred 换行（分隔已有内容）
+            cursor.movePosition(QTextCursor.End)
+            if self._deferred_line_break:
+                cursor.insertText("\n")
+                self._deferred_line_break = False
+            is_endmost = True
+            materialize_trailing = False
+
+        start_pos = cursor.position()
+        prefix_emitted = False
+        for i, seg in enumerate(segments):
+            if i > 0:
+                cursor.insertText("\n")
+            if seg:
+                this_prefix = prefix if not prefix_emitted else ""
+                prefix_emitted = True
+                safe = html.escape(seg)
+                cursor.insertHtml(f'<span style="color:{color};">{this_prefix}{safe}</span>')
+        if materialize_trailing:
+            cursor.insertText("\n")
+        end_pos = cursor.position()
+
+        # 维护其它 key 的区间（覆盖路径使旧 end 之后整体平移 delta = 新end - 旧end）
+        if rng is not None:
+            self._shift_after(rng[1], end_pos - rng[1])
+        # deferred 只由"落在文档末尾"的操作更新
+        if is_endmost:
+            self._deferred_line_break = ends_with_break
+        # partial 写回区间（下次覆盖）；final 定稿清区间（文本永久）
+        if not commit:
+            self._interim[key] = (start_pos, end_pos)
+        elif rng is not None:
+            self._interim.pop(key, None)
 
     def set_status(self, text: str, color: str | None = None):
         self.status_label.setText(text)
@@ -1119,14 +1191,25 @@ class SubtitlePanel(QWidget):
         if total <= max_chars:
             return
         keep = int(max_chars * 0.9)
+        D = total - keep
         cursor = QTextCursor(doc)
         cursor.movePosition(QTextCursor.Start)
-        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, total - keep)
+        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, D)
         cursor.removeSelectedText()
+        # 头部删了 D 字符 → 修正所有 interim 区间（否则位置错位，下次覆盖删错文本）
+        for key, (s, e) in list(self._interim.items()):
+            if e <= D:                      # 整段被删
+                del self._interim[key]
+            elif s < D:                     # 部分重叠 → 区间腐败，丢弃（该 interim 重建）
+                del self._interim[key]
+            else:
+                self._interim[key] = (s - D, e - D)
 
     # ---------- 按钮 ----------
     def _on_clear(self):
         self.view.clear()
+        self._interim.clear()
+        self._deferred_line_break = False
 
     def closeEvent(self, e):
         if getattr(self, "_force_quit", False):
@@ -1390,6 +1473,7 @@ class SubtitlePanel(QWidget):
 
     def clear_transcript(self):
         self.view.clear()
+        self._interim.clear()
         self._deferred_line_break = False
 
     def set_toolbar_hide_delay(self, ms: int):

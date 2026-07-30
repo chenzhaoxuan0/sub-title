@@ -212,20 +212,20 @@ class FunAsrNanoStreamingEngine(AsrEngine):
             await ws.send(pkt)
 
     async def _receiver_loop(self, ws) -> None:
-        """接收服务端消息，只回调定稿句子（sentences），不回调 partial。
+        """接收服务端消息，回调定稿句（sentences, is_final=True）+ 中间结果（partial,
+        is_final=False）。UI 以 interim 覆盖处理：partial 覆盖当前行（实时逐字 + 跨次
+        纠错），sentences 定稿换行——既有实时流式又不重复堆积。
 
         响应格式（realtime_ws 新协议，endpoint-mode server）：
           {"event":"started"|"stopped"}        控制事件，日志即可
           {"event":"error","error":...}        错误，记日志
           {"sentences":[{text,start,end,spk}], 服务端 VAD 分段后的定稿句（累计，靠
            "partial":"...",                     _sent_count 去重，只回调新增）
-           "is_final":bool}
+           "is_final":bool}                     partial=当前 utterance 完整中间文本
 
-        ⚠ 故意忽略 partial：partial 是当前 utterance 的完整中间文本（每次 decode 重新
-        生成），而 UI 是追加模式——回调 partial 会被逐条追加导致重复堆积（实测"的目标
-        呢？这个目标为什么..."循环 + nano LLM 重复生成）。server 模式下服务端 VAD 自动
-        分段，sentences 即逐句最终结果，UI 追加定稿句正确不重复。代价：无逐字增量
-        （句末才出，但 VAD 句末延迟 < 段式 2s）。
+        顺序：先回调 sentences（定稿旧句，commit 旧 interim）再回调 partial（起新
+        interim）。同 key (source, None)，sentences 先 final 把旧 interim 定稿，partial
+        起新 interim 覆盖显示。
         """
         async for raw in ws:
             if self._closed:
@@ -243,13 +243,18 @@ class FunAsrNanoStreamingEngine(AsrEngine):
                 else:
                     logger.info(f"服务端事件: {event}")
                 continue
-            # 只回调新增的定稿句子（sentences 累计，靠 _sent_count 去重）
+            # 先回调新增的定稿句（sentences 累计，靠 _sent_count 去重；is_final=True）
             sentences = msg.get("sentences") or []
             for sent in sentences[self._sent_count:]:
                 text = (sent.get("text") or "").strip()
                 if text:
                     self.on_result(text, True, self.source, spk_id=None)
             self._sent_count = len(sentences)
+            # 再回调 partial（当前 utterance 完整中间文本，is_final=False）：UI 以 interim
+            # 覆盖实时显示 + 纠错。在 sentences 之后——先定稿旧句，partial 起新 interim。
+            partial = (msg.get("partial") or "").strip()
+            if partial:
+                self.on_result(partial, False, self.source, spk_id=None)
 
     async def _shutdown_ws(self) -> None:
         """stop() 投递的关闭协程：发 STOP 关闭 session（新协议替代旧 is_speaking:false）。
