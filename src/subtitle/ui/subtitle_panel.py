@@ -305,6 +305,15 @@ class SubtitlePanel(QWidget):
         # 位置区间 [start, end)（QChar 单位）。partial 覆盖它（实时逐字 + 跨次纠错），
         # final 定稿（清区间，文本永久）。详见 _insert_item。
         self._interim: dict[tuple[str, object], tuple[int, int]] = {}
+        # 拆分模式（仅 funasr nano WSL 流式）：_split_sources 里的 source 走"按句号拆——
+        # 历史可纠错、当前句 append-only 不纠错"。其余 source 走上面的 interim 覆盖（原状）。
+        self._split_sources: set[str] = set()
+        # 拆分模式专属状态（按 key=(source,spk_id)，只 split 模式的 key 进这些表）：
+        # _regions 三元组 (start,split,end)：[start,split) 历史(可纠错)、[split,end) 当前(append-only)
+        self._regions: dict[tuple[str, object], tuple[int, int, int]] = {}
+        self._hist_sentences: dict[tuple[str, object], list[str]] = {}
+        self._finalized_count: dict[tuple[str, object], int] = {}
+        self._cur_text: dict[tuple[str, object], str] = {}
 
         self._init_window_flags()
         self._init_ui()
@@ -1027,9 +1036,17 @@ class SubtitlePanel(QWidget):
         for text, is_final, source, spk_id in merged:
             if not text:
                 continue
-            # commit=False=partial（写回区间，下次覆盖）；True=final（定稿不写回）
-            self._insert_item(cursor, doc, source, spk_id, text, is_final,
-                              commit=is_final)
+            if source in self._split_sources:
+                # 拆分模式（funasr nano 流式）：历史纠错 + 当前句 append-only（句号换行）
+                key = (source, spk_id)
+                if is_final:
+                    self._handle_final(cursor, doc, key, source, spk_id, text)
+                else:
+                    self._handle_partial(cursor, doc, key, source, spk_id, text)
+            else:
+                # 原状：interim 覆盖（commit=False=partial 写回区间，True=final 定稿不写回）
+                self._insert_item(cursor, doc, source, spk_id, text, is_final,
+                                  commit=is_final)
             self._trim_if_needed()
         cursor.endEditBlock()
         # 滚动锚定（原样）
@@ -1047,9 +1064,9 @@ class SubtitlePanel(QWidget):
         return doc.characterCount() - 1
 
     def _shift_after(self, boundary_pos: int, delta: int) -> None:
-        """boundary_pos 之后的 interim 区间整体 +delta。
+        """boundary_pos 之后的所有区间点整体 +delta（原状 _interim + 拆分 _regions 三元组）。
 
-        用于中间 interim 覆盖后其后方区间平移（删旧插新净变化 delta）。基于旧坐标
+        用于中间区间覆盖/插入后其后方区间平移（删旧插新净变化 delta）。基于旧坐标
         +delta = 新坐标（其它 key 的旧坐标在本次删/插后净偏移正好是 delta）。
         """
         if delta == 0:
@@ -1057,6 +1074,12 @@ class SubtitlePanel(QWidget):
         for key, (s, e) in list(self._interim.items()):
             if s >= boundary_pos:
                 self._interim[key] = (s + delta, e + delta)
+        for key, (s, sp, e) in list(self._regions.items()):
+            self._regions[key] = (
+                s + delta if s >= boundary_pos else s,
+                sp + delta if sp >= boundary_pos else sp,
+                e + delta if e >= boundary_pos else e,
+            )
 
     def _insert_item(self, cursor, doc, source, spk_id, text, is_final, commit: bool) -> None:
         """把一条文本插入文档：命中 interim 区间则覆盖，否则追加。
@@ -1134,6 +1157,181 @@ class SubtitlePanel(QWidget):
         elif rng is not None:
             self._interim.pop(key, None)
 
+    # ---------- 拆分模式（仅 _split_sources 里的 source：funasr nano WSL 流式）----------
+    # 按"最后一个句末标点"拆 partial：前缀（含标点，历史，可纠错覆盖）+ 后缀（当前句，
+    # append-only 不纠错）。句号出现→旧当前定稿进历史、新句起最底行。布局：历史在上、
+    # 当前句独占最底行实时增长（不跳）。详见 plan 文档。
+
+    _SENTENCE_END = frozenset("。！？!?…")   # 与 line_breaker._SENTENCE_END 同源
+
+    def set_split_sources(self, names: set[str]) -> None:
+        """设置走拆分逻辑的 source 名集合（app._on_started 调，funasr nano 流式）。"""
+        self._split_sources = set(names)
+
+    def _split_sentences(self, text: str) -> list[str]:
+        """按句末标点切句，标点归前句。'A。B！' -> ['A。', 'B！']；无标点 -> [text]。"""
+        out, buf = [], []
+        for ch in text:
+            buf.append(ch)
+            if ch in self._SENTENCE_END:
+                out.append("".join(buf)); buf = []
+        if buf:
+            out.append("".join(buf))
+        return out
+
+    def _split_partial(self, text: str) -> tuple[list[str], str]:
+        """partial -> (历史句列表, 当前句 suffix)。最后一个句末标点（含）前=历史、后=当前。"""
+        idx = max((i for i, ch in enumerate(text) if ch in self._SENTENCE_END), default=-1)
+        if idx == -1:
+            return ([], text)
+        return (self._split_sentences(text[:idx + 1]), text[idx + 1:])
+
+    def _drop_split_key(self, key) -> None:
+        """清理一个 split key 的所有状态（trim 区间腐败时）。"""
+        self._regions.pop(key, None)
+        self._hist_sentences.pop(key, None)
+        self._finalized_count.pop(key, None)
+        self._cur_text.pop(key, None)
+
+    def _doc_ends_with_break(self, doc) -> bool:
+        c = QTextCursor(doc); c.movePosition(QTextCursor.End)
+        c.movePosition(QTextCursor.PreviousCharacter, QTextCursor.KeepAnchor)
+        return c.selectedText() in ("\n", " ")
+
+    def _insert_html_segments(self, cursor, text, source, spk_id, with_prefix: bool) -> None:
+        """把含 \\n 的 text 作为着色 html 插入；with_prefix 时仅首段带 [说话人] 前缀。"""
+        color = self._source_style(source)
+        prefix = self._speaker_prefix(source, spk_id) if with_prefix else ""
+        prefix_emitted = not with_prefix
+        for i, seg in enumerate(text.split("\n")):
+            if i > 0:
+                cursor.insertText("\n")
+            if seg:
+                this_prefix = prefix if not prefix_emitted else ""
+                prefix_emitted = True
+                cursor.insertHtml(f'<span style="color:{color};">{this_prefix}{html.escape(seg)}</span>')
+
+    def _create_span(self, cursor, doc, key, source, spk_id, sentences, suffix) -> None:
+        """首次建档：在文档末尾建 [历史+当前] 连续区间。"""
+        cursor.movePosition(QTextCursor.End)
+        if doc.characterCount() > 1 and not self._doc_ends_with_break(doc):
+            cursor.insertText("\n")          # 跨 key 分隔符（不纳入区间，位于 start 之前）
+        start = cursor.position()
+        hist = "\n".join(sentences)
+        if hist:
+            self._insert_html_segments(cursor, hist, source, spk_id, with_prefix=True)
+        split = cursor.position()
+        if suffix:
+            if sentences:
+                cursor.insertText("\n")      # 历史↔当前分隔符（归当前子区间头部）
+            self._insert_html_segments(cursor, suffix, source, spk_id, with_prefix=not sentences)
+        end = cursor.position()
+        self._regions[key] = (start, split, end)
+        self._hist_sentences[key] = list(sentences)
+        self._finalized_count[key] = 0
+        self._cur_text[key] = suffix
+
+    def _rebuild_history(self, cursor, key, sentences, source, spk_id) -> None:
+        """历史子区间 [start,split) 整段重建（删旧重插，可纠错）。"""
+        start, split, end = self._regions[key]
+        if split > start:
+            cursor.setPosition(start)
+            cursor.setPosition(split, QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()
+        cursor.setPosition(start)
+        hist = "\n".join(sentences)
+        if hist:
+            self._insert_html_segments(cursor, hist, source, spk_id, with_prefix=True)
+        new_split = cursor.position()
+        self._shift_after(split, new_split - split)
+        _, _, end2 = self._regions[key]
+        self._regions[key] = (start, new_split, end2)
+        self._hist_sentences[key] = list(sentences)
+
+    def _set_current(self, cursor, key, new_suffix, source, spk_id) -> None:
+        """重置当前子区间 [split,end)：删旧 + 插 sep+new_suffix（句号定稿后起新句）。"""
+        start, split, end = self._regions[key]
+        if end > split:
+            cursor.setPosition(split)
+            cursor.setPosition(end, QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()
+        cursor.setPosition(split)
+        if new_suffix and self._hist_sentences.get(key):
+            cursor.insertText("\n")
+        if new_suffix:
+            self._insert_html_segments(cursor, new_suffix, source, spk_id, with_prefix=False)
+        new_end = cursor.position()
+        if new_end - end:
+            self._shift_after(end, new_end - end)
+        self._regions[key] = (start, split, new_end)
+        self._cur_text[key] = new_suffix
+
+    def _append_current(self, cursor, key, delta_text, source, spk_id) -> None:
+        """当前句追加新增字（在 end 处插，append-only 不纠错）。"""
+        start, split, end = self._regions[key]
+        cursor.setPosition(end)
+        if end == split and self._hist_sentences.get(key):
+            cursor.insertText("\n")          # 当前原空且有历史 → 先补分隔符
+        self._insert_html_segments(cursor, delta_text, source, spk_id, with_prefix=False)
+        new_end = cursor.position()
+        if new_end - end:
+            self._shift_after(end, new_end - end)
+        self._regions[key] = (start, split, new_end)
+        self._cur_text[key] = self._cur_text.get(key, "") + delta_text
+
+    def _clear_current(self, cursor, key) -> None:
+        """定稿当前句：清当前子区间 [split,end)。"""
+        start, split, end = self._regions[key]
+        if end > split:
+            cursor.setPosition(split)
+            cursor.setPosition(end, QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()
+            self._shift_after(end, -(end - split))
+        self._regions[key] = (start, split, split)
+        self._cur_text[key] = ""
+
+    def _dedup_tail(self, permanent, final_sentences):
+        if not permanent or not final_sentences:
+            return final_sentences
+        k = len(final_sentences)
+        return [] if (len(permanent) >= k and permanent[-k:] == final_sentences) else final_sentences
+
+    def _handle_partial(self, cursor, doc, key, source, spk_id, text) -> None:
+        prefix_sentences, suffix = self._split_partial(text)
+        if key not in self._regions:
+            self._create_span(cursor, doc, key, source, spk_id, prefix_sentences, suffix)
+            return
+        finalized = self._finalized_count.get(key, 0)
+        old_sentences = self._hist_sentences.get(key, [])
+        old_live = old_sentences[finalized:]
+        old_cur = self._cur_text.get(key, "")
+        new_sentences = old_sentences[:finalized] + prefix_sentences
+        live_grew = len(prefix_sentences) > len(old_live)   # 句号把旧当前定稿进历史
+        if new_sentences != old_sentences:
+            self._rebuild_history(cursor, key, new_sentences, source, spk_id)
+        if live_grew:
+            self._set_current(cursor, key, suffix, source, spk_id)
+        elif suffix == old_cur:
+            pass                                            # 不变
+        elif suffix.startswith(old_cur):
+            self._append_current(cursor, key, suffix[len(old_cur):], source, spk_id)
+        else:
+            pass                                            # 纠错/回退：保护当前句不动
+
+    def _handle_final(self, cursor, doc, key, source, spk_id, text) -> None:
+        finalized = self._finalized_count.get(key, 0)
+        if key not in self._regions:
+            sents = [s for s in self._split_sentences(text.strip()) if s]
+            self._create_span(cursor, doc, key, source, spk_id, sents, "")
+            self._finalized_count[key] = len(self._hist_sentences.get(key, []))
+            return
+        permanent = self._hist_sentences.get(key, [])[:finalized]
+        final_sents = self._dedup_tail(permanent, [s for s in self._split_sentences(text.strip()) if s])
+        new_sentences = permanent + final_sents
+        self._rebuild_history(cursor, key, new_sentences, source, spk_id)
+        self._clear_current(cursor, key)
+        self._finalized_count[key] = len(new_sentences)
+
     def set_status(self, text: str, color: str | None = None):
         self.status_label.setText(text)
 
@@ -1196,7 +1394,7 @@ class SubtitlePanel(QWidget):
         cursor.movePosition(QTextCursor.Start)
         cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, D)
         cursor.removeSelectedText()
-        # 头部删了 D 字符 → 修正所有 interim 区间（否则位置错位，下次覆盖删错文本）
+        # 头部删了 D 字符 → 修正所有区间（原状 _interim + 拆分 _regions）
         for key, (s, e) in list(self._interim.items()):
             if e <= D:                      # 整段被删
                 del self._interim[key]
@@ -1204,12 +1402,21 @@ class SubtitlePanel(QWidget):
                 del self._interim[key]
             else:
                 self._interim[key] = (s - D, e - D)
+        for key, (s, sp, e) in list(self._regions.items()):
+            if e <= D or s < D:             # 整段被删 / 部分重叠 → 丢弃管理（文本留壳）
+                self._drop_split_key(key)
+            else:
+                self._regions[key] = (s - D, sp - D, e - D)
 
     # ---------- 按钮 ----------
     def _on_clear(self):
         self.view.clear()
         self._interim.clear()
         self._deferred_line_break = False
+        self._regions.clear()
+        self._hist_sentences.clear()
+        self._finalized_count.clear()
+        self._cur_text.clear()
 
     def closeEvent(self, e):
         if getattr(self, "_force_quit", False):
@@ -1475,6 +1682,10 @@ class SubtitlePanel(QWidget):
         self.view.clear()
         self._interim.clear()
         self._deferred_line_break = False
+        self._regions.clear()
+        self._hist_sentences.clear()
+        self._finalized_count.clear()
+        self._cur_text.clear()
 
     def set_toolbar_hide_delay(self, ms: int):
         self.ui_cfg.toolbar_hide_delay_ms = int(ms)

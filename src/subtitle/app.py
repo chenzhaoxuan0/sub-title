@@ -352,6 +352,15 @@ class SubtitleApp:
             suffix = "（" + "/".join(fallback_sources) + " 流式不可用，已降级段式）"
         else:
             suffix = ""
+        # 拆分模式（句号换行 + 当前 append-only + 历史纠错）：只对 funasr nano WSL 流式
+        # 且未降级的 source 生效；其他引擎走原 interim 覆盖。每次启动按当前引擎重算。
+        split_sources = set()
+        for name, prof in (("system", self.cfg.asr.system), ("mic", self.cfg.asr.mic)):
+            if (getattr(prof, "engine_type", "") == "funasr_nano"
+                    and getattr(prof, "funasr_nano_mode", "") == "streaming"
+                    and not getattr(prof, "_nano_streaming_fallback", False)):
+                split_sources.add(name)
+        self.panel.set_split_sources(split_sources)
         self.panel.set_status(f"运行中 · 实时识别{suffix}")
         self.tray.set_running(True)
         self.tray.notify("sub-title", "已开始实时识别")
@@ -368,6 +377,7 @@ class SubtitleApp:
         if self._worker is not None:
             self._worker.stop()    # pipeline.stop：发哨兵 + join 推理线程（推理线程内 engine.stop）
         self._cleanup_thread()
+        self.panel.set_split_sources(set())
         self.panel.set_status("已停止")
         self.tray.set_running(False)
         if was_running:

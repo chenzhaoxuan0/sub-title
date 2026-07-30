@@ -82,6 +82,71 @@ class SubtitlePanelTests(unittest.TestCase):
             panel.deleteLater()
             APP.processEvents()
 
+    # ---- 拆分模式（仅 funasr nano 流式：set_split_sources）----
+
+    def test_split_punctuation_newline_and_append(self):
+        # 句号换行；当前句 append-only 追加
+        panel = SubtitlePanel(Config().ui)
+        panel.set_split_sources({"system"})
+        try:
+            panel._on_text_appended("你好。再见", False)
+            panel._flush_pending_text()
+            self.assertEqual(panel.view.toPlainText(), "你好。\n再见")
+            panel._on_text_appended("你好。再见吗", False)
+            panel._flush_pending_text()
+            self.assertEqual(panel.view.toPlainText(), "你好。\n再见吗")
+        finally:
+            panel.deleteLater()
+            APP.processEvents()
+
+    def test_split_multi_sentence_promote(self):
+        # 多句号：当前句定稿进历史、新句起最底行
+        panel = SubtitlePanel(Config().ui)
+        panel.set_split_sources({"system"})
+        try:
+            panel._on_text_appended("A", False)
+            panel._flush_pending_text()
+            self.assertEqual(panel.view.toPlainText(), "A")
+            panel._on_text_appended("A。B", False)
+            panel._flush_pending_text()
+            self.assertEqual(panel.view.toPlainText(), "A。\nB")
+            panel._on_text_appended("A。B。C", False)
+            panel._flush_pending_text()
+            self.assertEqual(panel.view.toPlainText(), "A。\nB。\nC")
+        finally:
+            panel.deleteLater()
+            APP.processEvents()
+
+    def test_split_history_correct_current_kept(self):
+        # 历史可纠错；当前句不动
+        panel = SubtitlePanel(Config().ui)
+        panel.set_split_sources({"system"})
+        try:
+            panel._on_text_appended("你好。再见", False)
+            panel._flush_pending_text()
+            panel._on_text_appended("你好啊。再见", False)   # 历史"你好。"→"你好啊。"
+            panel._flush_pending_text()
+            text = panel.view.toPlainText()
+            self.assertIn("你好啊。", text)   # 历史纠错生效
+            self.assertIn("再见", text)        # 当前句保留
+        finally:
+            panel.deleteLater()
+            APP.processEvents()
+
+    def test_split_final_replaces_live(self):
+        # final 取代活历史+当前，不重复
+        panel = SubtitlePanel(Config().ui)
+        panel.set_split_sources({"system"})
+        try:
+            panel._on_text_appended("你好。再见", False)
+            panel._flush_pending_text()
+            panel._on_text_appended("你好。再见。", True)    # final 定稿
+            panel._flush_pending_text()
+            self.assertEqual(panel.view.toPlainText(), "你好。\n再见。")
+        finally:
+            panel.deleteLater()
+            APP.processEvents()
+
 
 if __name__ == "__main__":
     unittest.main()
