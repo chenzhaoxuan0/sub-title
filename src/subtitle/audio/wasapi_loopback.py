@@ -14,6 +14,7 @@ sounddevice/PortAudio 在 Windows 上不支持 loopback（输出设备 max_input
 """
 from __future__ import annotations
 
+import logging
 import platform
 import queue
 import threading
@@ -21,6 +22,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # 平台守卫：本模块仅在 Windows 上可用（依赖 windll / comtypes / pycaw / mmdevapi.dll）。
 # 非 Windows（macOS / Linux）在模块顶部就抛 ImportError，避免打包时被 PyInstaller 误扫描、
@@ -75,7 +78,7 @@ class WasapiLoopbackCapture(threading.Thread):
             self._run_loop()
         except Exception as e:
             self._error = str(e)
-            print(f"[wasapi] 采集异常: {e}")
+            logger.exception(f"采集异常: {e}")
 
     def stop(self):
         self._stop.set()
@@ -144,7 +147,7 @@ class WasapiLoopbackCapture(threading.Thread):
         bits = wfx.wBitsPerSample
         block_align = wfx.nBlockAlign
         # mix format 通常是 float32 (IEEE), bits=32
-        print(f"[wasapi] mix format: {sr}Hz {channels}ch {bits}bit")
+        logger.info(f"mix format: {sr}Hz {channels}ch {bits}bit")
 
         # 用 mix format 初始化（loopback 模式）
         # hnsBufferDuration: 纳秒(100ns 单位)，给 0.5s 缓冲
@@ -164,7 +167,7 @@ class WasapiLoopbackCapture(threading.Thread):
 
         audio_client.Start()
         self.info = LoopbackInfo(sample_rate=sr, channels=channels)
-        print(f"[wasapi] loopback 已启动，采样率={sr} ch={channels}")
+        logger.info(f"loopback 已启动，采样率={sr} ch={channels}")
 
         # 主循环：读 buffer
         frame_size = int(sr * self.block_seconds)
@@ -216,4 +219,4 @@ class WasapiLoopbackCapture(threading.Thread):
                 audio_client.Stop()
             except Exception:
                 pass
-            print("[wasapi] loopback 已停止")
+            logger.info("loopback 已停止")

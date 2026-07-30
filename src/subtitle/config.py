@@ -71,11 +71,21 @@ class AsrConfig:
     funasr_punc_model: str = "iic/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727"
     funasr_punc_device: str = "cpu"   # CT-Transformer 轻量，CPU 即可，避免和 ASR 抢 GPU
 
-    # ---- Fun-ASR-Nano（2025，中文/方言/歌词，段式）----
+    # ---- Fun-ASR-Nano（2025，中文/方言/歌词）----
     funasr_nano_model: str = "FunAudioLLM/Fun-ASR-Nano-2512"
     funasr_nano_device: str = "cuda"
     funasr_nano_language: str = "中文"
-    funasr_nano_segment_seconds: float = 2.0
+    # 推理模式：
+    #   "segment"（默认）—— 段式，走 AutoModel，零额外依赖，攒满 segment_seconds 出一段
+    #   "streaming"        —— 流式，连 WSL2 里的 funasr-realtime-server（WebSocket），逐字低延迟；
+    #                         需用户先在 WSL2 起服务且更吃显存。连不上时 factory 自动回退段式。
+    funasr_nano_mode: str = "segment"
+    funasr_nano_segment_seconds: float = 2.0  # 仅段式用；流式模式下忽略
+    # 流式服务地址（funasr-realtime-server 默认监听 10095）。
+    # 默认 localhost：现代 Windows 的 WSL2 支持把 localhost 转发到 WSL 内端口；
+    # 旧版/关了转发的 Windows 改成 WSL IP（`wsl hostname -I` 查看）。
+    funasr_nano_streaming_host: str = "localhost"
+    funasr_nano_streaming_port: int = 10095
 
     # ---- Qwen3-ASR（2026，多语种/歌曲，段式；原生流式需 vLLM）----
     qwen3_asr_model: str = "Qwen/Qwen3-ASR-0.6B"
@@ -133,6 +143,10 @@ class UiConfig:
     win_h: int = 140
     # 行为
     close_action: str = "ask"
+    # 退出时是否直接 wsl --shutdown 关闭整个 WSL（释放全部显存）。
+    # 默认 False：走 SIGINT 优雅退出（不关 WSL、不殃及其他 WSL 程序）。
+    # True：退出时 shutdown_wsl()——100% 释放显存，但会杀掉所有 WSL 发行版的进程。
+    wsl_shutdown_on_quit: bool = False
     toolbar_hide_delay_ms: int = 800
     lock_scroll_to_bottom: bool = False
     # 自动分行：识别到句末标点（。！？!?…）或引擎句子边界（is_final）时换行。

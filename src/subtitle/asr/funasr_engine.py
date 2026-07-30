@@ -18,11 +18,14 @@ stop 后置 _closed，feed 直接返回；generate 异常后重置 cache。
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import numpy as np
 
 from .base import AsrEngine, OnResult
+
+logger = logging.getLogger(__name__)
 
 
 class FunAsrEngine(AsrEngine):
@@ -53,8 +56,8 @@ class FunAsrEngine(AsrEngine):
         )
         if self._diarization_enabled:
             model_kwargs["spk_model"] = "cam++"
-        print(
-            f"[funasr] 加载模型 {self.cfg.model} (device={device})"
+        logger.info(
+            f"加载模型 {self.cfg.model} (device={device})"
             + (" + spk_model=cam++（说话人区分）" if self._diarization_enabled else "")
             + "，首次会下载..."
         )
@@ -66,12 +69,12 @@ class FunAsrEngine(AsrEngine):
                 "punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727",
             )
             punc_dev = getattr(self.cfg, "funasr_punc_device", "cpu")
-            print(f"[funasr] 加载流式标点模型 {punc_id} (device={punc_dev})，首次会下载...")
+            logger.info(f"加载流式标点模型 {punc_id} (device={punc_dev})，首次会下载...")
             self._punc_model = AutoModel(
                 model=punc_id, device=punc_dev, disable_update=True, hub="ms",
             )
-            print("[funasr] 标点模型就绪")
-        print("[funasr] 模型就绪")
+            logger.info("标点模型就绪")
+        logger.info("模型就绪")
 
     def _punctuate(self, text: str) -> str:
         """增量标点：喂 delta 文本，返回补完标点的 delta（前缀不漂移）。
@@ -86,7 +89,7 @@ class FunAsrEngine(AsrEngine):
             if res and res[0].get("text"):
                 return res[0]["text"]
         except Exception as e:
-            print(f"[funasr] 标点异常（降级裸文本）: {e}")
+            logger.warning(f"标点异常（降级裸文本）: {e}")
         return text
 
     def feed(self, chunk: np.ndarray) -> None:
@@ -113,7 +116,7 @@ class FunAsrEngine(AsrEngine):
                 )
                 self.on_result(text, False, self.source, spk_id)
         except Exception as e:
-            print(f"[funasr] feed 异常，重置 cache: {e}")
+            logger.exception(f"feed 异常，重置 cache: {e}")
             self.cache = {}   # 异常后重置，避免半更新状态污染下一段
 
     def _extract_latest_spk(self, res0: dict) -> Optional[int]:
@@ -153,7 +156,7 @@ class FunAsrEngine(AsrEngine):
                     use_itn=True,
                 )
             except Exception as e:
-                print(f"[funasr] stop final 异常: {e}")
+                logger.exception(f"stop final 异常: {e}")
         self.cache = {}
 
     def reset(self) -> None:

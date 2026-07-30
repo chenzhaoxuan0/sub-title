@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 
 import numpy as np
 
 from .base import AsrEngine, OnResult
 from .modelscope_hub import download_modelscope
+
+logger = logging.getLogger(__name__)
 
 
 def qwen3_asr_available() -> bool:
@@ -66,7 +69,7 @@ class Qwen3AsrEngine(AsrEngine):
         dtype = torch.float32 if device == "cpu" else torch.bfloat16
         device_map = device if device == "cpu" else f"{device}:0"
         precision = "4bit" if quantization == "4bit" else str(dtype).replace("torch.", "")
-        print(f"[qwen3_asr] 从 ModelScope 下载并加载 {model_id} (device={device}, {precision})...")
+        logger.info(f"从 ModelScope 下载并加载 {model_id} (device={device}, {precision})...")
         model_path = download_modelscope(model_id, "Qwen3-ASR")
         model_kwargs = dict(
             dtype=dtype, device_map=device_map,
@@ -77,7 +80,7 @@ class Qwen3AsrEngine(AsrEngine):
         self.model = Qwen3ASRModel.from_pretrained(
             model_path, **model_kwargs,
         )
-        print(f"[qwen3_asr] 就绪，段时长={seconds}s")
+        logger.info(f"就绪，段时长={seconds}s")
 
     def feed(self, chunk: np.ndarray) -> None:
         if self._closed or self.model is None:
@@ -108,7 +111,7 @@ class Qwen3AsrEngine(AsrEngine):
             if text:
                 self.on_result(text, is_final=True, source=self.source, spk_id=None)
         except Exception as error:
-            print(f"[qwen3_asr] 推理异常: {error}")
+            logger.exception(f"推理异常: {error}")
 
     def stop(self) -> None:
         if self._closed:

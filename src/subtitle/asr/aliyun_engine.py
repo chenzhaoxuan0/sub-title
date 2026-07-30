@@ -17,11 +17,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 
 import numpy as np
 
 from .base import AsrEngine, OnResult
+
+logger = logging.getLogger(__name__)
 
 
 _NLS_URL = "wss://nls-gateway.cn-shanghai.aliyuncs.com/ws/v1"
@@ -53,12 +56,12 @@ class AliyunEngine(AsrEngine):
                 "凭证会存到系统保险箱（" + credentials.storage_location() + "）。"
             )
 
-        print("[aliyun] 获取 token...")
+        logger.info("获取 token...")
         self._token = nls.getToken(akid, aksecret)
         if not self._token:
             raise RuntimeError("getToken 失败，请检查 AccessKey ID/Secret")
 
-        print("[aliyun] 创建 transcriber...")
+        logger.info("创建 transcriber...")
         self._tr = nls.NlsSpeechTranscriber(
             url=_NLS_URL,
             token=self._token,
@@ -80,7 +83,7 @@ class AliyunEngine(AsrEngine):
             enable_inverse_text_normalization=True,
         )
         self._started = True
-        print("[aliyun] 就绪（实时流式）")
+        logger.info("就绪（实时流式）")
 
     def feed(self, chunk: np.ndarray) -> None:
         if self._closed or not self._started or self._tr is None:
@@ -95,11 +98,11 @@ class AliyunEngine(AsrEngine):
                 self._tr.send_audio(pkt)
                 self._send_fail_count = 0
             except Exception as e:
-                print(f"[aliyun] send_audio 异常: {e}")
+                logger.exception(f"send_audio 异常: {e}")
                 self._send_fail_count += 1
                 # 连续失败 3 次：连接已断，停止后续发送
                 if self._send_fail_count >= 3:
-                    print("[aliyun] 连续发送失败，标记停止")
+                    logger.warning("连续发送失败，标记停止")
                     self._started = False
                 break
 
@@ -118,18 +121,18 @@ class AliyunEngine(AsrEngine):
             try:
                 self._tr.stop()
             except Exception as e:
-                print(f"[aliyun] tr.stop 异常: {e}")
+                logger.exception(f"tr.stop 异常: {e}")
             finally:
                 done.set()
 
         threading.Thread(target=_do_stop, daemon=True).start()
         if not done.wait(timeout=3):
             # 超时：强制关闭连接
-            print("[aliyun] stop 超时 3s，强制 shutdown")
+            logger.warning("stop 超时 3s，强制 shutdown")
             try:
                 self._tr.shutdown()
             except Exception as e:
-                print(f"[aliyun] shutdown 异常: {e}")
+                logger.exception(f"shutdown 异常: {e}")
 
     def reset(self) -> None:
         pass
@@ -143,7 +146,7 @@ class AliyunEngine(AsrEngine):
             return ""
 
     def _on_start_cb(self, msg, *args):
-        print("[aliyun] 会话已启动")
+        logger.info("会话已启动")
 
     def _on_sentence_begin_cb(self, msg, *args):
         pass
@@ -164,11 +167,11 @@ class AliyunEngine(AsrEngine):
             self.on_result(text, is_final=True, source=self.source, spk_id=None)
 
     def _on_completed_cb(self, msg, *args):
-        print("[aliyun] 会话完成")
+        logger.info("会话完成")
 
     def _on_error_cb(self, msg, *args):
-        print(f"[aliyun] 错误: {msg}")
+        logger.error(f"错误: {msg}")
 
     def _on_close_cb(self, *args):
-        print("[aliyun] 连接关闭")
+        logger.info("连接关闭")
         self._started = False

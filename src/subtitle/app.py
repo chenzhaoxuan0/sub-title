@@ -1,7 +1,9 @@
 """PyQt 应用主入口 v2 —— pipeline + 字幕面板 + 系统托盘 + 主题引擎 + 皮肤系统。"""
 from __future__ import annotations
 
+import logging
 import os
+import platform
 import sys
 from pathlib import Path
 
@@ -13,6 +15,9 @@ from .asr import create_engine
 from .pipeline import SubtitlePipeline
 from .ui import SubtitlePanel, TrayController, SettingsDialog, get_theme_manager
 from . import credentials, paths
+from . import logging_setup
+
+logger = logging.getLogger(__name__)
 
 try:
     import yaml
@@ -34,19 +39,19 @@ def _migrate_on_startup() -> None:
     # ---- 1) 文件迁移 ----
     for legacy in paths.legacy_config_candidates():
         if paths.migrate_legacy_config(legacy, new_path):
-            print(f"[startup] 迁移 {legacy} → {new_path}")
+            logger.info("迁移 %s → %s", legacy, new_path)
     # 还要扫描 .migrated 备份文件
     for backup in list(Path.cwd().glob("config.yaml.migrated*")):
         try:
             _extract_credentials_to_keyring(backup, clear_after=True)
         except Exception as e:
-            print(f"[startup] 处理 {backup} 失败: {e}")
+            logger.exception("处理 %s 失败", backup)
     # ---- 2) 当前 config.yaml 里的 AK 字段（用户从老版本升级但还没点过设置）----
     if new_path.exists():
         try:
             _extract_credentials_to_keyring(new_path, clear_after=True)
         except Exception as e:
-            print(f"[startup] 检查 config.yaml 的 AK 字段失败: {e}")
+            logger.exception("检查 config.yaml 的 AK 字段失败")
 
 
 def _extract_credentials_to_keyring(yaml_path: Path, *, clear_after: bool) -> None:
@@ -69,14 +74,14 @@ def _extract_credentials_to_keyring(yaml_path: Path, *, clear_after: bool) -> No
     if not (ak_id or ak_secret or appkey):
         return  # 没有任何凭证，跳过
     credentials.set_aliyun(ak_id=ak_id, ak_secret=ak_secret, appkey=appkey)
-    print(f"[startup] 已将 {yaml_path.name} 里的阿里云凭证迁移到系统保险箱"
-          f"（{credentials.storage_location()}）")
+    logger.info("已将 %s 里的阿里云凭证迁移到系统保险箱（%s）",
+                yaml_path.name, credentials.storage_location())
     if clear_after:
         try:
             with open(yaml_path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
         except Exception as e:
-            print(f"[startup] 清理 {yaml_path} 的 AK 字段失败: {e}")
+            logger.exception("清理 %s 的 AK 字段失败", yaml_path)
 
 
 def _apply_first_run_recommendation() -> None:
@@ -96,8 +101,8 @@ def _apply_first_run_recommendation() -> None:
     try:
         info = hardware.detect()
         engine_type, overrides = hardware.recommend_engine(info)
-    except Exception as e:
-        print(f"[startup] 硬件检测失败，沿用默认配置: {e}")
+    except Exception:
+        logger.exception("硬件检测失败，沿用默认配置")
         return
 
     asr_section = {"system": {"engine_type": engine_type, **overrides}}
@@ -107,11 +112,12 @@ def _apply_first_run_recommendation() -> None:
             yaml.safe_dump({"asr": asr_section}, f,
                            allow_unicode=True, sort_keys=False)
         gpu = f"{info['gpu_name']}({info['cuda_vram_gb']}GB)" if info["has_cuda"] else "无"
-        print(f"[startup] 首次启动硬件检测：CPU={info['cpu_cores']}核 "
-              f"RAM={info['ram_gb']}GB GPU={gpu} "
-              f"AppleSilicon={info['is_apple_silicon']} → 推荐 {engine_type}")
-    except Exception as e:
-        print(f"[startup] 写推荐配置失败: {e}")
+        logger.info("首次启动硬件检测：CPU=%s核 RAM=%sGB GPU=%s "
+                    "AppleSilicon=%s → 推荐 %s",
+                    info['cpu_cores'], info['ram_gb'], gpu,
+                    info['is_apple_silicon'], engine_type)
+    except Exception:
+        logger.exception("写推荐配置失败")
 
 
 class _PipelineWorker(QObject):
@@ -188,7 +194,7 @@ class _PipelineWorker(QObject):
             try:
                 p.stop()
             except Exception as e:
-                print(f"[worker] pipeline.stop 异常: {e}")
+                logger.exception("pipeline.stop 异常")
         self._pipelines.clear()
 
 
@@ -335,7 +341,27 @@ class SubtitleApp:
         return False
 
     def _on_started(self):
-        self.panel.set_status("运行中 · 实时识别")
+        # 检测 factory 是否因流式服务不可用而把 Nano 流式静默降级为段式
+        # （factory 在降级时给对应 source 的 AsrConfig 打 _nano_streaming_fallback 标记，
+        # 这是运行期属性，不会写进 config.yaml）。检测到就在状态栏提示一次。
+        fallback_sources = [
+            name for name, prof in (("🔊", self.cfg.asr.system), ("🎤", self.cfg.asr.mic))
+            if getattr(prof, "_nano_streaming_fallback", False)
+        ]
+        if fallback_sources:
+            suffix = "（" + "/".join(fallback_sources) + " 流式不可用，已降级段式）"
+        else:
+            suffix = ""
+        # 拆分模式（句号换行 + 当前 append-only + 历史纠错）：只对 funasr nano WSL 流式
+        # 且未降级的 source 生效；其他引擎走原 interim 覆盖。每次启动按当前引擎重算。
+        split_sources = set()
+        for name, prof in (("system", self.cfg.asr.system), ("mic", self.cfg.asr.mic)):
+            if (getattr(prof, "engine_type", "") == "funasr_nano"
+                    and getattr(prof, "funasr_nano_mode", "") == "streaming"
+                    and not getattr(prof, "_nano_streaming_fallback", False)):
+                split_sources.add(name)
+        self.panel.set_split_sources(split_sources)
+        self.panel.set_status(f"运行中 · 实时识别{suffix}")
         self.tray.set_running(True)
         self.tray.notify("sub-title", "已开始实时识别")
         self.skin_runtime.on_recognition_start()
@@ -351,6 +377,7 @@ class SubtitleApp:
         if self._worker is not None:
             self._worker.stop()    # pipeline.stop：发哨兵 + join 推理线程（推理线程内 engine.stop）
         self._cleanup_thread()
+        self.panel.set_split_sources(set())
         self.panel.set_status("已停止")
         self.tray.set_running(False)
         if was_running:
@@ -370,7 +397,7 @@ class SubtitleApp:
             self._thread.quit()
             # 加长等待：pipeline.stop 内部 join 推理线程最多 10s，这里给足
             if not self._thread.wait(12000):
-                print("[app] 警告：worker 线程 12s 后仍未退出")
+                logger.warning("worker 线程 12s 后仍未退出")
             self._thread = None
             self._worker = None
 
@@ -401,7 +428,7 @@ class SubtitleApp:
             with open(path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
         except Exception as e:
-            print(f"[app] 保存配置失败: {e}")
+            logger.exception("保存配置失败")
 
     # ---------- 设置 ----------
     def _open_settings(self):
@@ -460,7 +487,7 @@ class SubtitleApp:
                 self.cfg.skin.active_skin if self.cfg.skin.enabled else "",
             )
         except Exception as e:
-            print(f"[skin] 刷新皮肤菜单失败: {e}")
+            logger.exception("刷新皮肤菜单失败")
 
     def _on_skin_selected(self, name: str):
         if not name:
@@ -505,7 +532,26 @@ class SubtitleApp:
         try:
             self._stop()
         except Exception as e:
-            print(f"[app] 退出时 _stop 异常: {e}")
+            logger.exception("退出时 _stop 异常")
+        # 释放被 WSL 里 nano 流式 vLLM 占住的显存（约 13GB）。必须在 _force_exit
+        # (os._exit) 之前发信号，否则进程被强杀来不及清理。
+        # 按配置 ui.wsl_shutdown_on_quit 选策略：
+        #   True → wsl --shutdown（100% 释放，但关整个 WSL，殃及其他 WSL 程序）；
+        #   False（默认）→ SIGINT 优雅退出（不关 WSL，WSL 进程异步释放 1-3 分钟），
+        #                  仅在用过流式（显存 >8GB）时发，没用过不动 WSL。
+        # _quit 用异步 SIGINT（不阻塞 os._exit）；同步等退出走 stop_server（设置面板停止/
+        # 启动前清理用），这里不调。万一 SIGINT 没释放干净，下次 start_server 幽灵检测提示。
+        try:
+            from .asr.wsl_nano_service import WslNanoService
+            svc = WslNanoService()
+            if getattr(self.cfg.ui, "wsl_shutdown_on_quit", False):
+                logger.info("退出：配置了退出时关闭 WSL，执行 wsl --shutdown")
+                svc.shutdown_wsl()
+            elif svc.gpu_mem_heavily_used():
+                logger.info("退出：发 SIGINT 让 vLLM 优雅退出（1-3 分钟异步释放）")
+                svc.request_graceful_shutdown()
+        except Exception as e:
+            logger.exception("退出时清理 WSL nano 异常")
         self.skin_runtime.disable()
         self._save_config()
         # 显式关闭所有顶层窗口（panel + 非模态设置/皮肤编辑器）。
@@ -517,7 +563,7 @@ class SubtitleApp:
                     w._app_closing = True
                     w.close()
         except Exception as e:
-            print(f"[app] 关闭顶层窗口异常: {e}")
+            logger.exception("关闭顶层窗口异常")
         self.tray.tray.hide()
         self.app.quit()
 
@@ -525,6 +571,20 @@ class SubtitleApp:
         self.panel.show()
         self.tray.show()
         self.tray.notify("sub-title", "已启动，右键托盘图标查看菜单")
+        # Ctrl+C（SIGINT）兜底：默认 Python 收到 SIGINT 会抛 KeyboardInterrupt 直接
+        # 中断，不走 _quit → 不停 WSL 里的 vLLM → 显存泄漏。这里捕获后转交 _quit
+        # （含 stop_server 释放显存）。signal handler 里不能直接操作 Qt 对象，用
+        # singleShot 排到事件循环主线程执行。SIGTERM 在 Windows 基本不会触发，顺带
+        # 注册以防部分环境。aboutToQuit → os._exit 跳过 atexit，所以必须靠 _quit 同步清理。
+        import signal
+        from PySide6.QtCore import QTimer
+        def _sig_to_quit(*_):
+            QTimer.singleShot(0, self._quit)
+        for _sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                signal.signal(_sig, _sig_to_quit)
+            except (ValueError, OSError):
+                pass  # 非主线程或信号不可注册
         # 兜底：Qt 事件循环退出后，若后台 C 扩展线程（soundcard WASAPI /
         # faster-whisper CUDA）卡住导致 sys.exit 无法正常返回，这里强制结束进程，
         # 保证「托盘退出 / 工具栏 X 退出 / Ctrl+C」都能让窗口 + 命令行黑框一起消失。
@@ -579,3 +639,10 @@ def _setup_console_io() -> None:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
         except Exception:
             pass  # 非 TextIOWrapper（如上面的 _NullStream 或重定向）就不动
+    # 配置全局日志（文件 + 控制台）。在 stdout/stderr 修好后调，确保打包 --windowed
+    # （stdout 是 NullStream）时 StreamHandler 也能挂上而不崩。
+    log_path = logging_setup.configure()
+    logging.getLogger(__name__).info(
+        "sub-title 启动 | %s %s | 日志: %s",
+        platform.system(), platform.release(), log_path,
+    )

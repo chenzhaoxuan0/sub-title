@@ -7,6 +7,7 @@ soundcard 原生支持 Windows loopback（对 default_speaker 开 recorder 即�
 """
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import time
@@ -14,6 +15,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # 注意：soundcard 的 mediafoundation 后端在 import 时会调 CoInitialize/CoInitializeEx
 # 初始化当前线程的 COM（_com = _COMLibrary() 是模块级全局）。
@@ -152,7 +155,7 @@ class SystemAudioCapture(threading.Thread):
             self._run_loop()
         except Exception as e:
             self.error = str(e)
-            print(f"[capture] 异常: {e}")
+            logger.exception(f"异常: {e}")
 
     def stop(self):
         self._stop.set()
@@ -167,21 +170,21 @@ class SystemAudioCapture(threading.Thread):
         if mic is None:
             raise RuntimeError(_loopback_not_found_message())
         self._mic = mic
-        print(f"[capture] loopback 源: {mic.name}")
+        logger.info(f"loopback 源: {mic.name}")
 
         # soundcard recorder 会把数据重采样到我们指定的 samplerate
         # 用 blocksize 让每次 record 返回约 block_samples 帧
         block = self.block_samples
         with mic.recorder(samplerate=self.target_sr, channels=1, blocksize=block) as rec:
             self.actual_sr = self.target_sr
-            print(f"[capture] 录音流已打开 ({self.target_sr}Hz mono, block~{block})")
+            logger.info(f"录音流已打开 ({self.target_sr}Hz mono, block~{block})")
             while not self._stop.is_set():
                 try:
                     data = rec.record(numframes=block)
                 except Exception as e:
                     if self._stop.is_set():
                         break
-                    print(f"[capture] record 异常: {e}")
+                    logger.exception(f"record 异常: {e}")
                     time.sleep(0.05)
                     continue
                 # data: (frames, 1) float32 → (frames,)
@@ -190,7 +193,7 @@ class SystemAudioCapture(threading.Thread):
                     self.queue.put(mono, timeout=1)
                 except queue.Full:
                     pass  # 推理跟不上时丢块，保证实时性
-        print("[capture] 录音流已关闭")
+        logger.info("录音流已关闭")
 
 
 class MicrophoneCapture(threading.Thread):
@@ -229,7 +232,7 @@ class MicrophoneCapture(threading.Thread):
             self._run_loop()
         except Exception as e:
             self.error = str(e)
-            print(f"[mic-capture] 异常: {e}")
+            logger.exception(f"异常: {e}")
 
     def stop(self):
         self._stop.set()
@@ -243,19 +246,19 @@ class MicrophoneCapture(threading.Thread):
         if mic is None:
             raise RuntimeError("没找到麦克风设备，确认系统已连接麦克风并授权")
         self._mic = mic
-        print(f"[mic-capture] 麦克风源: {mic.name}")
+        logger.info(f"麦克风源: {mic.name}")
 
         block = self.block_samples
         with mic.recorder(samplerate=self.target_sr, channels=1, blocksize=block) as rec:
             self.actual_sr = self.target_sr
-            print(f"[mic-capture] 录音流已打开 ({self.target_sr}Hz mono, block~{block})")
+            logger.info(f"录音流已打开 ({self.target_sr}Hz mono, block~{block})")
             while not self._stop.is_set():
                 try:
                     data = rec.record(numframes=block)
                 except Exception as e:
                     if self._stop.is_set():
                         break
-                    print(f"[mic-capture] record 异常: {e}")
+                    logger.exception(f"record 异常: {e}")
                     time.sleep(0.05)
                     continue
                 mono = np.asarray(data, dtype=np.float32).reshape(-1)
@@ -263,4 +266,4 @@ class MicrophoneCapture(threading.Thread):
                     self.queue.put(mono, timeout=1)
                 except queue.Full:
                     pass
-        print("[mic-capture] 录音流已关闭")
+        logger.info("录音流已关闭")
