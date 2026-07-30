@@ -19,10 +19,15 @@ ws://<host>:10095。默认 host=localhost（WSL2 localhost 转发）；连不上
   - feed() 在 pipeline 推理线程调用：float32→int16→按 1920 字节分包→_send_q
   - WS 回调在守护线程触发：解析 text/mode/is_final → on_result（跨线程，靠 _closed 守卫）
 
-握手与响应格式取自 FunASR 官方 funasr_wss_client.py 源码（非 README 推测）：
-  - 握手: {"mode":"2pass","chunk_size":[5,10,5],...,"is_speaking":true,"itn":true}
-  - 响应: {"text":..,"mode":"2pass-online|2pass-offline","is_final":..,"spk_name":..}
-  - 结束: {"is_speaking":false}
+协议（funasr-realtime-server 1.3.30 的 realtime_ws 新协议，非旧 funasr_wss_client）：
+  - 激活: 发文本 "START" → 服务端 {"event":"started"}，session.is_active=True
+  - 音频: 发二进制 PCM 帧（int16/16kHz/1920 字节），服务端定期返回 partial 增量
+  - 响应: {"sentences":[{text,...}], "partial":"增量", "is_final":bool}
+          或 {"event":"started|stopped|error"}
+  - 结束: 发 "STOP"（服务端 commit pending 出最终 + 回 stopped）
+⚠ 旧 funasr_wss_client 的 JSON 握手 {"mode":"2pass",...} 在本服务端已废弃——
+  handle_client 只认 START/COMMIT/STOP 文本命令，旧 JSON 无 else 分支被忽略 →
+  is_active=False → 音频帧全丢、永不返回结果。
 
 依赖（可选）：websockets（funasr 传递依赖）。未装时 import 失败 → 走 factory 段式回退。
 """
@@ -83,6 +88,7 @@ class FunAsrNanoStreamingEngine(AsrEngine):
         self._ws_thread: Optional[threading.Thread] = None
         self._closed = False         # stop 后置 True，回调与 feed 守卫
         self._ready = False          # 守护线程握手完成后置 True
+        self._sent_count = 0         # 已回调的 sentence 数（响应 sentences 累计，靠它去重）
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -175,19 +181,11 @@ class FunAsrNanoStreamingEngine(AsrEngine):
         # subprotocols=['binary'] 与官方 client 一致，确保音频按二进制帧传输
         async with websockets.connect(uri, subprotocols=["binary"]) as ws:
             self._ws = ws
-            # 握手配置（官方 funasr_wss_client.py 真实格式）
-            config = {
-                "mode": "2pass",                 # 2pass = online 实时 + offline 修正双流
-                "chunk_size": [5, 10, 5],
-                "chunk_interval": 10,
-                "encoder_chunk_look_back": 4,
-                "decoder_chunk_look_back": 0,
-                "wav_name": "microphone",
-                "is_speaking": True,
-                "hotwords": "",
-                "itn": True,
-            }
-            await ws.send(json.dumps(config, ensure_ascii=False))
+            # 新协议：发 START 激活 session。旧 funasr_wss_client 的 JSON 握手
+            # {"mode":"2pass",...} 在 1.3.30 已废弃——handle_client 只认 START/COMMIT/STOP
+            # 文本命令，旧 JSON 无 else 分支被忽略 → is_active=False → 后续音频帧
+            # "and session.is_active" 全部丢弃，永不返回结果（实测音频发出但零转写）。
+            await ws.send("START")
             self._ready = True
             # 收发并行：发送协程消费 _send_q，接收协程解析服务端消息
             sender = asyncio.ensure_future(self._sender_loop(ws))
@@ -214,35 +212,54 @@ class FunAsrNanoStreamingEngine(AsrEngine):
             await ws.send(pkt)
 
     async def _receiver_loop(self, ws) -> None:
-        """接收服务端消息，解析并回调 on_result。
+        """接收服务端消息，解析新协议响应并回调 on_result。
 
-        官方响应字段：text / mode / is_final /（可选）spk_name, spk_score
-        mode 取值："2pass-online"（含 "online"）= 增量中间结果；
-                   "2pass-offline"（含 "offline"）= 句末最终修正。
+        响应格式（realtime_ws 新协议）：
+          {"event":"started"|"stopped"}        控制事件，日志即可
+          {"event":"error","error":...}        错误，记日志
+          {"sentences":[{text,start,end,spk}], 已完成的句子（累计，靠 _sent_count 去重）
+           "partial":"增量文本",                当前 utterance 未确认增量
+           "is_final":bool}                     commit/stop 时 True
+        映射：sentences 新增→on_result(is_final=True) 定稿；
+              partial→on_result(is_final=False) 增量更新当前行。
         """
         async for raw in ws:
             if self._closed:
-                # 已 stop：丢弃后续残余回调，避免 worker 析构后踩空
                 break
             try:
                 msg = json.loads(raw)
             except (TypeError, ValueError):
                 continue
-            text = msg.get("text") or ""
-            if not text:
+            if not isinstance(msg, dict):
                 continue
-            mode = str(msg.get("mode", ""))
-            # offline = 句末最终结果；online/其余 = 增量中间结果
-            is_final = "offline" in mode or bool(msg.get("is_final"))
-            # TODO(分角色): 官方响应含 spk_name/spk_score 字段，但 Nano+eres2netv2 的
-            # 流式组合未经充分验证，当前先传 None，后续单独验证后再透传 spk_id。
-            self.on_result(text, is_final, self.source, spk_id=None)
+            event = msg.get("event")
+            if event is not None:
+                if event == "error":
+                    logger.warning(f"服务端错误: {msg.get('error')}")
+                else:
+                    logger.info(f"服务端事件: {event}")
+                continue
+            # 识别结果：先回调新增的已完成句子（定稿），再回调 partial（增量）
+            sentences = msg.get("sentences") or []
+            for sent in sentences[self._sent_count:]:
+                text = (sent.get("text") or "").strip()
+                if text:
+                    self.on_result(text, True, self.source, spk_id=None)
+            self._sent_count = len(sentences)
+            partial = (msg.get("partial") or "").strip()
+            if partial:
+                self.on_result(partial, False, self.source, spk_id=None)
 
     async def _shutdown_ws(self) -> None:
-        """stop() 投递的关闭协程：发结束 JSON，等服务端收尾。"""
+        """stop() 投递的关闭协程：发 STOP 关闭 session（新协议替代旧 is_speaking:false）。
+
+        服务端 STOP 会 commit pending audio 出最终 + 回 {"event":"stopped"}。注意 stop()
+        已置 _closed=True，_receiver_loop 随后 break，最终结果可能不被回调（用户已停止，
+        定稿最后一句意义不大；如需可在 stop 前单独发 COMMIT）。
+        """
         if self._ws is None:
             return
         try:
-            await self._ws.send(json.dumps({"is_speaking": False}))
+            await self._ws.send("STOP")
         except Exception:
             pass
