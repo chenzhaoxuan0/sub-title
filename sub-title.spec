@@ -58,10 +58,15 @@ hiddenimports += [
     "subtitle.asr.funasr_engine",
     "subtitle.asr.sensevoice_engine",
     "subtitle.asr.funasr_nano_engine",
+    "subtitle.asr.funasr_nano_streaming_engine",   # nano 流式（WSL2+vLLM）Windows 侧客户端
+    "subtitle.asr.wsl_nano_service",               # nano 流式 WSL 生命周期管理（wsl.exe 调用）
     "subtitle.asr.qwen3_asr_engine",
     "subtitle.asr.faster_whisper_engine",
     "subtitle.asr.aliyun_engine",
 ]
+# ---- websockets：nano 流式 Windows 侧 WebSocket 客户端（load() 里延迟 import，
+# PyInstaller 静态分析会漏）。纯 API 模式也要它——nano 流式靠它连 WSL 里的服务。 ----
+hiddenimports += collect_submodules("websockets")
 
 # ============================================================
 # excludes：明确排除本地引擎的重依赖（纯 API 模式不打包这些）

@@ -35,6 +35,10 @@ platformdirs
 # 用于存阿里云 AccessKey 等敏感信息，绝不放进 config.yaml。
 keyring
 
+# Fun-ASR-Nano 流式模式（WSL2+vLLM）的 Windows 侧 WebSocket 客户端依赖。
+# 纯 API 打包也含它，让 exe 用户配好 WSL 后能用 nano 流式（vLLM 在 WSL 里跑）。
+websockets
+
 # ---------- 本地引擎依赖（可选；仅用 API 模式可不装）----------
 # SenseVoice / FunASR / Fun-ASR-Nano 都基于 funasr（其 PyPI 包会自动拉 torch）。
 # Qwen3-ASR / faster-whisper 的模型快照统一从 ModelScope 下载。
