@@ -11,7 +11,7 @@
 ### 识别引擎（可切换）
 - **FunASR Paraformer 流式**（`paraformer-zh-streaming`）：原生流式，RTF 0.06–0.1，延迟 < 100ms，中文准确。需要 NVIDIA GPU。
 - **SenseVoice-Small**（`iic/SenseVoiceSmall`）：234M 小模型，CPU 即可流畅，适合 Mac / 无 GPU 设备。段式伪流式（VAD 切句 + 整段推理），延迟略高。
-- **Fun-ASR-Nano**（`FunAudioLLM/Fun-ASR-Nano-2512`）：800M 新一代模型，面向中文、方言、歌词和音乐背景。当前为段式实时模式，推荐 NVIDIA GPU。
+- **Fun-ASR-Nano**（`FunAudioLLM/Fun-ASR-Nano-2512`）：800M 新一代模型，面向中文、方言、歌词和音乐背景。支持段式实时（Windows 原生）与**流式实时（WSL2 + vLLM，逐字增量 + 句末纠错）**。流式模式资源占用显著更高（详见下文硬件参考）。
 - **Qwen3-ASR**（[`0.6B`](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B) / [`1.7B`](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)）：2026 年发布的多语种/歌曲模型；当前为段式实时模式，原生流式需要 NVIDIA GPU 与 vLLM。使用前安装 `pip install qwen-asr`，权重只从 ModelScope 下载。
 - **faster-whisper**：保留给已有配置和多语种兼容用途。Whisper 在静音、音乐暂停和片尾可能输出幻觉字幕，VAD 只能缓解，中文音乐请优先使用 Fun-ASR-Nano 或 Qwen3-ASR。可用权重从 ModelScope 下载。
 - **阿里云 NLS API**：云端流式识别，任意平台可用，免本地算力。按量计费。
@@ -40,7 +40,8 @@
 | --- | ---: | --- | --- |
 | FunASR Paraformer 流式 | 约 1GB | NVIDIA GPU 4GB+；或 8 线程、16GB RAM | 当前默认的低延迟本地方案；CPU 可用但应优先保证 CPU 性能。 |
 | SenseVoice-Small | 约 250MB | 4 核、8GB RAM；GPU 非必需 | 最通用的 CPU/Mac 方案，不提供 GGUF 入口。 |
-| Fun-ASR-Nano | 约 1.5-2GB | NVIDIA GPU 6GB+、16GB RAM | 未接入可选 GGUF/INT8 权重；CPU 可加载但通常不适合实时。 |
+| Fun-ASR-Nano（段式） | 约 1.5-2GB | NVIDIA GPU 6GB+、16GB RAM | 段式实时（Windows 原生）。未接入 GGUF/INT8；CPU 可加载但通常不适合实时。 |
+| Fun-ASR-Nano（流式） | 同上 + vLLM | **NVIDIA GPU 8GB+（16GB 舒适）、16GB+ RAM、WSL2** | 流式逐字 + 句末纠错，跑在 WSL2 的 vLLM 上。显存按 GPU 自适应（目标 ~4GB，但 PyTorch 预留 + CUDA graph 使 nvidia-smi 实际显示更高，16GB 卡约 8GB），WSL2 虚拟机另占数 GB RAM。**资源占用远高于段式**，首次启动 2-4 分钟（vLLM 加载 + flashinfer JIT + CUDA graph 捕获）。显存 < 8GB 或 RAM < 16GB 不建议用流式。 |
 | Qwen3-ASR 0.6B | 约 1.9GB | NVIDIA GPU 6GB+、16GB RAM | 可在设置中选 CUDA 4-bit 运行时量化，适合显存较紧张的 GPU；4-bit 需要 `bitsandbytes`，不支持 CPU。 |
 | Qwen3-ASR 1.7B | 约 4-5GB | NVIDIA GPU 12GB+、24GB RAM | 更高准确率；也可尝试 CUDA 4-bit，但实时表现取决于 GPU。 |
 | faster-whisper small | 约 0.5GB | 4 核、8GB RAM | 选择 `INT8` 即可用量化 CPU 推理，是低内存本地备选。 |
@@ -144,9 +145,20 @@ python -m subtitle
 4. 无需额外依赖（复用 funasr + torch 的 CPU 版即可）
 
 ### Fun-ASR-Nano（本地，中文/歌词）
-1. 设置 → 识别引擎 → 选「本地 Fun-ASR-Nano」
+
+段式与流式两种模式（设置 → 识别引擎 → Fun-ASR-Nano → 模式）：
+
+**段式实时**（Windows 原生，资源省）：
+1. 模式选「段式」
 2. 推荐使用 NVIDIA GPU；模型首次使用会从 ModelScope 自动下载（[模型页](https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512)）
-3. 此模型适合中文、方言、歌词与带音乐背景的内容；当前使用段式实时推理
+3. 此模型适合中文、方言、歌词与带音乐背景的内容
+
+**流式实时**（WSL2 + vLLM，逐字增量 + 句末纠错，**资源占用显著更高**）：
+1. 模式选「流式」。需要 Windows + WSL2 + NVIDIA GPU——vLLM 不支持 Windows 原生，故推理服务跑在 WSL2 里，Windows 主程序作为 WebSocket 客户端连接
+2. 首次在 设置 → 识别 → WSL 面板点「安装 WSL 环境」（装 miniconda + Python 3.11 + funasr/vllm，约 10-20 分钟、~2GB 下载），再点「启动 WSL 服务」
+3. 启动慢（vLLM 加载模型 + flashinfer JIT 编译 + CUDA graph 捕获，首次约 2-4 分钟）
+4. ⚠️ **资源占用大**：显存按 GPU 总显存自适应（目标 ~4GB 预算，但 PyTorch caching allocator 预留 + CUDA graph 使 `nvidia-smi` 实际显示更高，16GB 卡约 8GB），WSL2 虚拟机另占数 GB RAM。**显存 < 8GB 或 RAM < 16GB 的机器不建议用流式**，用段式即可（同模型、零 WSL 依赖）
+5. 用完在 WSL 面板点「关闭 WSL 服务」（执行 `wsl --shutdown`，100% 释放显存，但会关闭整个 WSL——殃及其他 WSL 程序，点击时有确认提示）。也可在 设置 → 行为 勾「退出时关闭 WSL」，退出程序自动关
 
 ### Qwen3-ASR（本地，多语种/歌曲）
 1. 先安装可选依赖：`pip install qwen-asr`
