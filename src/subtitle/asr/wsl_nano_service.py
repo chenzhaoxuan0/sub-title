@@ -334,7 +334,8 @@ class WslNanoService:
 
         # 启动前清理上次没干净退出的残留实例：vLLM 崩溃/异常退出会留 EngineCore 孤儿
         # 进程占显存，不清会和本次新实例叠加（两实例各抢 0.8 显存 → OOM/卡死）。
-        self.stop_server()
+        # 用 SIGINT 优雅停止（stop_server 内部等退出释放显存，避免强杀致幽灵）。
+        self.stop_server(progress=progress)
         # 幽灵显存检测：WSL2 下 vLLM 异常退出可能不释放显存（进程已没但显存空占），
         # 此时新实例会 OOM 起不来——只能 wsl --shutdown 重置，程序内无法修，提示用户。
         mem_used = self._gpu_mem_used_mib()
@@ -375,7 +376,7 @@ class WslNanoService:
                     gpu_util, _VLLM_MEM_BUDGET_GIB)
         script = (
             f"{env_prefix}"
-            f"nohup {_ENV_FUNASR_RT} --endpoint-mode client --port {port} "
+            f"nohup {_ENV_FUNASR_RT} --endpoint-mode server --port {port} "
             f'--language "{language}" --dtype bf16 --gpu-memory-utilization {gpu_util} '
             f"> {_LOG_FILE} 2>&1 < /dev/null & "
             # 等进程名出现后用 pgrep 抓 PID（比 $! 可靠）
@@ -483,50 +484,63 @@ class WslNanoService:
         util = (_VLLM_MEM_BUDGET_GIB * 1024) / total_mib
         return round(max(_VLLM_MEM_UTIL_MIN, min(_VLLM_MEM_UTIL_MAX, util)), 2)
 
-    def stop_server(self) -> bool:
-        """停掉 WSL 里的 funasr-realtime-server 及其子进程，释放显存。
+    def stop_server(self, progress: Optional[ProgressCb] = None) -> bool:
+        """停掉 WSL 里的 funasr-realtime-server，SIGINT 优雅退出释放显存。
 
-        两阶段杀，确保杀干净整个进程树。直接 kill 主进程会漏掉 vLLM spawn 出来的
-        EngineCore 子进程——它持有显存、命令行不含 ``funasr[-]realtime-server``，
-        成孤儿后在 WSL2 下变成"幽灵显存"（进程没了但显存空占，只能 wsl --shutdown 回收）：
+        用 SIGINT（而非 SIGTERM/SIGKILL 强杀）：SIGINT 走 asyncio 取消 → vLLM 对象 GC →
+        EngineCoreClient.shutdown() → EngineCore 子进程 cleanup 释放 CUDA context →
+        显存释放（实测 1-3 分钟）。SIGTERM/SIGKILL 强杀会让 EngineCore 被强终止、不跑
+        cleanup → WSL2 下变"幽灵显存"（进程没了但显存空占，只能 wsl --shutdown 回收）。
 
-          1. SIGTERM 主进程（PID 文件 + 进程名）：给 vLLM 优雅退出、主动释放显存的机会；
-          2. 等 ~2s 后 SIGKILL 兜底：杀该 conda 环境所有残留 python（EngineCore spawn
-             子进程 + multiprocessing resource_tracker 孤儿——命令行都含
-             ``subtitle-nano/bin/python``，第一步杀不到）。
+        步骤：
+          1. SIGINT 主进程（字符类 ``[-]`` 防 pkill 自杀，见模块注释）；
+          2. 轮询等端口关闭 + 显存回落（每 3s，上限 180s，够 SIGINT 退出窗口）；
+          3. 超时兜底 SIGKILL（可能幽灵，后续 start_server 幽灵检测会提示 wsl --shutdown）。
+        progress 回调报进度（"等待优雅退出…"），让设置面板/启动流程可见。
 
-        字符类 ``[-]`` 防 pkill 自杀：``pkill -f X[-]Y`` 执行时，bash 命令行字面含
-        ``X[-]Y``，正则 ``[-]`` 只匹配 ``-``、遇到 ``[`` 失配 → 不杀自己；而真进程
-        命令行是 ``X-Y``，匹配。（脚本内绝不出现无方括号形式，否则会自杀。）
-
-        幂等：没在跑也返回 True。设置面板「停止」按钮（_WslServerWorker）调用；app._quit
-        改走 shutdown_wsl——杀进程不释放 WSL2 显存，只有 wsl --shutdown 能释放。
+        幂等：没在跑也返回 True。设置面板「停止」按钮 + start_server 启动前清理调用。
+        app._quit 不走这里（同步等 180s 会卡退出）——它用 request_graceful_shutdown
+        （异步 SIGINT）或 shutdown_wsl（配置开关）。
         """
         import time
-        # 1) SIGTERM 主进程：PID 文件精确 kill（xargs 喂 PID，避免 $(cat) 的 $ 被吞空）
-        #    + 进程名兜底（字符类防 pkill 自杀）。
-        script_term = (
-            f'[ -f {_PID_FILE} ] && cat {_PID_FILE} | xargs -r kill 2>/dev/null; '
-            f"rm -f {_PID_FILE}; "
-            f"pkill -TERM -f 'funasr[-]realtime-server' 2>/dev/null; true"
-        )
+
+        def _say(msg: str) -> None:
+            if progress:
+                progress(msg)
+
+        # 幂等：没在跑且显存没异常 → 直接返回，避免无谓 SIGINT/等待
+        if not probe(_DEFAULT_HOST, self._port(), timeout=0.5) \
+                and self._gpu_mem_used_mib() < 8000:
+            return True
+        # 清掉旧 PID 文件（stop 后失效）
         try:
-            _wsl(script_term, timeout=15)
+            _wsl(f"rm -f {_PID_FILE} 2>/dev/null", timeout=5)
         except (subprocess.SubprocessError, OSError):
             pass
-        # 给 vLLM 优雅退出、释放 EngineCore 显存的时间
-        time.sleep(2.0)
-        # 2) SIGKILL 兜底：杀该环境所有残留 python（EngineCore + resource_tracker 孤儿）。
-        #    专用环境 subtitle-nano，误杀风险极低；不杀会留幽灵显存。
+        _say("发 SIGINT 让 vLLM 优雅退出（释放显存，最多等 ~3 分钟）…")
+        try:
+            _wsl("pkill -INT -f 'funasr[-]realtime-server' 2>/dev/null; true", timeout=15)
+        except (subprocess.SubprocessError, OSError):
+            pass
+        # 轮询等端口关闭 + 显存回落（SIGINT 优雅退出 1-3 分钟）
+        elapsed = 0
+        while elapsed < 180:
+            time.sleep(3)
+            elapsed += 3
+            port_closed = not probe(_DEFAULT_HOST, self._port(), timeout=0.5)
+            mem = self._gpu_mem_used_mib()
+            if port_closed and (mem < 0 or mem < 8000):
+                _say(f"服务已退出，显存回落到 {mem}MB")
+                return True
+            if elapsed % 15 == 0:
+                _say(f"等待优雅退出…（{elapsed}s，端口{'关' if port_closed else '开'}，显存 {mem}MB）")
+        # 超时兜底：SIGKILL（至少停服务；显存可能成幽灵，start_server 幽灵检测会提示）
+        _say("优雅退出超时，SIGKILL 兜底（显存可能需 wsl --shutdown 释放）")
         try:
             _wsl("pkill -9 -f 'subtitle[-]nano/bin/python' 2>/dev/null; true", timeout=15)
         except (subprocess.SubprocessError, OSError):
             pass
-        # 3) 验证端口已关（再给点时间释放）
-        for _ in range(10):
-            if not probe(_DEFAULT_HOST, self._port(), timeout=0.5):
-                return True
-            time.sleep(0.3)
+        time.sleep(2)
         return not probe(_DEFAULT_HOST, self._port(), timeout=0.5)
 
     def gpu_mem_heavily_used(self) -> bool:

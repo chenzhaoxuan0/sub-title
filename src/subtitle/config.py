@@ -143,6 +143,10 @@ class UiConfig:
     win_h: int = 140
     # 行为
     close_action: str = "ask"
+    # 退出时是否直接 wsl --shutdown 关闭整个 WSL（释放全部显存）。
+    # 默认 False：走 SIGINT 优雅退出（不关 WSL、不殃及其他 WSL 程序）。
+    # True：退出时 shutdown_wsl()——100% 释放显存，但会杀掉所有 WSL 发行版的进程。
+    wsl_shutdown_on_quit: bool = False
     toolbar_hide_delay_ms: int = 800
     lock_scroll_to_bottom: bool = False
     # 自动分行：识别到句末标点（。！？!?…）或引擎句子边界（is_final）时换行。

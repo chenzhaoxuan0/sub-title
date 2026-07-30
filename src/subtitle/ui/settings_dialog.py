@@ -1427,6 +1427,10 @@ class SettingsDialog(QDialog):
         self.close_combo.addItem("直接隐藏到托盘", "hide")
         self.close_combo.addItem("直接退出程序", "quit")
         g_behavior.add_card(_row("关闭行为", "点✕/Alt+F4时", self.close_combo))
+        self.wsl_shutdown_check = ToggleSwitch()
+        g_behavior.add_card(_row("退出时关闭 WSL",
+            "勾选后退出程序直接 wsl --shutdown 释放全部显存（会关闭所有 WSL 程序）",
+            self.wsl_shutdown_check))
         self.delay_spin = QSpinBox()
         self.delay_spin.setRange(200, 5000)
         self.delay_spin.setSingleStep(100)
@@ -1565,6 +1569,7 @@ class SettingsDialog(QDialog):
         self.topmost_check.setChecked(self.panel.get_pin())
         self.lock_scroll_check.setChecked(self.panel.get_lock_scroll())
         self.close_combo.setCurrentIndex(max(0, self.close_combo.findData(ui.close_action)))
+        self.wsl_shutdown_check.setChecked(getattr(ui, "wsl_shutdown_on_quit", False))
         self.delay_spin.setValue(ui.toolbar_hide_delay_ms)
         self.maxchars_spin.setValue(ui.max_chars)
         self.line_break_check.setChecked(self.panel.get_line_break())
@@ -1998,6 +2003,7 @@ class SettingsDialog(QDialog):
         p.set_pin(self.topmost_check.isChecked())
         p.set_lock_scroll(self.lock_scroll_check.isChecked())
         p.set_close_action(self.close_combo.currentData())
+        self.cfg.ui.wsl_shutdown_on_quit = self.wsl_shutdown_check.isChecked()
         p.set_toolbar_hide_delay(self.delay_spin.value())
         p.set_max_chars(self.maxchars_spin.value())
         p.set_line_break(self.line_break_check.isChecked())

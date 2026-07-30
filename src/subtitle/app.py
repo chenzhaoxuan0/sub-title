@@ -525,16 +525,20 @@ class SubtitleApp:
             logger.exception("退出时 _stop 异常")
         # 释放被 WSL 里 nano 流式 vLLM 占住的显存（约 13GB）。必须在 _force_exit
         # (os._exit) 之前发信号，否则进程被强杀来不及清理。
-        # 用 SIGINT 优雅退出（不关 WSL）：SIGINT 走 asyncio 取消 → vLLM 对象 GC →
-        # EngineCore shutdown → 释放 CUDA context。只发信号立即返回，WSL 进程异步退出
-        # （1-3 分钟），不阻塞本进程退出。只在本次确实用过流式 nano（显存被大量占用
-        # >8GB）时才发；没用过时显存仅桌面 ~2-4GB，跳过，不动 WSL。万一 SIGINT 没释放
-        # 干净（进程卡死等），下次 start_server 的幽灵检测会提示 wsl --shutdown。
+        # 按配置 ui.wsl_shutdown_on_quit 选策略：
+        #   True → wsl --shutdown（100% 释放，但关整个 WSL，殃及其他 WSL 程序）；
+        #   False（默认）→ SIGINT 优雅退出（不关 WSL，WSL 进程异步释放 1-3 分钟），
+        #                  仅在用过流式（显存 >8GB）时发，没用过不动 WSL。
+        # _quit 用异步 SIGINT（不阻塞 os._exit）；同步等退出走 stop_server（设置面板停止/
+        # 启动前清理用），这里不调。万一 SIGINT 没释放干净，下次 start_server 幽灵检测提示。
         try:
             from .asr.wsl_nano_service import WslNanoService
             svc = WslNanoService()
-            if svc.gpu_mem_heavily_used():
-                logger.info("退出：检测到流式 nano 显存占用，发 SIGINT 让 vLLM 优雅退出释放")
+            if getattr(self.cfg.ui, "wsl_shutdown_on_quit", False):
+                logger.info("退出：配置了退出时关闭 WSL，执行 wsl --shutdown")
+                svc.shutdown_wsl()
+            elif svc.gpu_mem_heavily_used():
+                logger.info("退出：发 SIGINT 让 vLLM 优雅退出（1-3 分钟异步释放）")
                 svc.request_graceful_shutdown()
         except Exception as e:
             logger.exception("退出时清理 WSL nano 异常")
