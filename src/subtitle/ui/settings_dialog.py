@@ -481,8 +481,8 @@ class EngineConfigCard(SettingCard):
             return   # 探测期间用户已点了动作，交给动作回调去刷新
         self.nano_wsl_btn.setEnabled(True)
         if running:
-            self.nano_wsl_status.setText("✅ WSL 流式服务运行中（持续占用显存，退出程序时自动关闭）")
-            self.nano_wsl_btn.setText("停止 WSL 服务")
+            self.nano_wsl_status.setText("✅ WSL 流式服务运行中（持续占用显存）")
+            self.nano_wsl_btn.setText("关闭 WSL 服务")
         elif installed:
             self.nano_wsl_status.setText("推理环境已就绪（funasr/vllm 已装），服务未运行")
             self.nano_wsl_btn.setText("启动 WSL 服务")
@@ -505,9 +505,21 @@ class EngineConfigCard(SettingCard):
             worker.progress.connect(
                 lambda msg: self.nano_wsl_status.setText(f"安装中：{msg}"))
             worker.finished_ok.connect(self._on_nano_wsl_setup_done)
-        elif "停止" in text:
-            self.nano_wsl_status.setText("正在停止 WSL 服务（释放显存）…")
-            self.nano_wsl_btn.setText("停止中…")
+        elif "关闭" in text or "停止" in text:
+            # wsl --shutdown 关闭整个 WSL（100% 释放显存，但殃及其他 WSL 程序），先确认
+            from PySide6.QtWidgets import QMessageBox
+            confirm = QMessageBox.question(
+                self, "关闭 WSL",
+                "此操作会执行 <b>wsl --shutdown</b>，<b>关闭整个 WSL</b>（所有 WSL 发行版"
+                "的进程都会被终止、释放全部显存）。\n\n如果 WSL 里还有其他程序在跑，"
+                "也会一并被关闭。确定继续？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if confirm != QMessageBox.Yes:
+                self._wsl_busy = False
+                self.nano_wsl_btn.setEnabled(True)
+                return
+            self.nano_wsl_status.setText("正在关闭 WSL（wsl --shutdown，释放全部显存）…")
+            self.nano_wsl_btn.setText("关闭中…")
             worker = _WslServerWorker(action="stop")
             worker.finished_ok.connect(self._on_nano_wsl_stop_done)
         else:  # 启动
@@ -551,7 +563,7 @@ class EngineConfigCard(SettingCard):
         self._wsl_busy = False
         self._wsl_worker = None
         if not ok:
-            self.nano_wsl_status.setText("⚠️ 停止可能未完全生效（显存或未释放）")
+            self.nano_wsl_status.setText("⚠️ WSL 关闭可能未完全生效")
         self._refresh_nano_wsl_status()
 
     def _apply_hardware_recommendation(self):
@@ -709,7 +721,11 @@ class _WslServerWorker(QThread):
         svc = WslNanoService()
         try:
             if self._action == "stop":
-                ok, err = svc.stop_server(), ""
+                # wsl --shutdown（100% 释放显存）。stop_server 的 SIGINT 优雅退出实测
+                # 无法可靠清显存（用户从未成功清掉过），直接关整个 WSL。代价是殃及
+                # 其他 WSL 程序——已在按钮点击时弹确认提示。
+                svc.shutdown_wsl()
+                ok, err = True, ""
             else:
                 ok, err = svc.start_server(self._port, self._language, self.progress.emit)
         except Exception as e:
