@@ -69,3 +69,33 @@ skin:
   editor_show_guides: true
   animation_fps: 30
   animation_loop: true
+
+# ============================================================
+# 翻译功能（可选）
+# ============================================================
+# 开启后：ASR 定稿句异步翻译，译文显示在字幕窗口底部独立一行，与原文各行出字、
+# 互不干扰（翻译后台线程，不阻塞 ASR）。关闭（enabled: false）= 单行原文，零回归。
+translate:
+  enabled: false                # 总开关
+  engine: azure                 # azure（推荐，官方免费层）/ google（免 key，易限流）/
+                                # libretranslate / nllb（本地离线）
+  source_lang: auto             # auto=自动检测（Azure/Google 支持；本地引擎需具体码）
+  target_lang: zh-Hans          # 目标语言
+  translate_final_only: true    # 只翻定稿句（避免 partial 频繁重译，建议保持 true）
+
+  # ---- 本地服务地址（仅 engine=libretranslate / nllb 用）----
+  # 复用 WSL 起服务模式（同 nano 流式）。服务需自行启动：
+  #   LibreTranslate: docker run -p 5000:5000 libretranslate/libretranslate --load-only en,zh
+  #   NLLB-200:       pip install git+https://github.com/thammegowda/nllb-serve 后 nllb-serve
+  libretranslate_host: localhost
+  libretranslate_port: 5000
+  nllb_host: localhost
+  nllb_port: 6060
+
+  # ---- 译文样式 ----
+  translation_font_scale: 0.85  # 译文字号 = 原文字号 × 此值
+  translation_color: ''         # 空=跟随主题文本色；填 hex（如 #5aa9ff）自定义
+
+  # Azure Translator 凭证（key + region）**不在这里**！
+  # 去「设置 → 翻译」填，会自动存到系统保险箱（与阿里云凭证同等安全）。
+  # 免费层 F0：每小时 200 万字符，无需付费。申请：Azure 门户 → 创建「翻译器」资源。

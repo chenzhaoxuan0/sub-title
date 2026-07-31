@@ -164,6 +164,10 @@ class UiConfig:
     # 麦克风字幕颜色（电脑声音用主题 subtitle_text）。走 UiConfig 而非 ThemeColors，
     # 避免改动主题 JSON 结构与现有主题迁移。
     mic_color: str = "#5aa9ff"
+    # 译文样式镜像（与 TranslationConfig 同步；panel 持有的是 ui_cfg，故放这里方便读取）。
+    # translation_color 空=跟随主题文本色；translation_font_scale=译文字号/原文字号。
+    translation_font_scale: float = 0.85
+    translation_color: str = ""
     # 设置对话框侧边栏：宽度可拖拽调、可一键收起为窄条。跨会话记忆。
     settings_sidebar_width: int = 200        # 展开时导航栏宽度（px）
     settings_sidebar_collapsed: bool = False  # 是否收起为窄条
@@ -180,6 +184,33 @@ class SkinConfig:
     editor_show_guides: bool = True          # 显示辅助线
     animation_fps: int = 30                  # 动画帧率
     animation_loop: bool = True              # 动画循环播放
+
+
+@dataclass
+class TranslationConfig:
+    """翻译功能配置。
+
+    开启后：ASR 定稿句（is_final=True）异步送翻译，译文在字幕窗口底部独立一行显示，
+    与原文各行出字、互不干扰（翻译不阻塞 ASR）。关闭（enabled=False）= 单行原状，零回归。
+
+    引擎选择：azure（主力，官方免费层 F0）/ google（免 key 备选，易限流）/
+              libretranslate / nllb（本地离线，复用 WSL 起服务模式）。
+    Azure 凭证（key/region）不在此 —— 由 credentials 模块存系统 keyring，
+    与阿里云凭证同等安全。
+    """
+    enabled: bool = False                    # 总开关（关=单行原状）
+    engine: str = "azure"                    # azure/google/libretranslate/nllb
+    source_lang: str = "auto"                # auto=自动检测（Azure 支持；本地引擎需具体码）
+    target_lang: str = "zh-Hans"             # 目标语言
+    translate_final_only: bool = True        # 只翻定稿句（避免 partial 频繁重译）
+    # ---- 本地服务地址（LibreTranslate / NLLB）----
+    libretranslate_host: str = "localhost"
+    libretranslate_port: int = 5000
+    nllb_host: str = "localhost"
+    nllb_port: int = 6060
+    # ---- 译文样式 ----
+    translation_font_scale: float = 0.85     # 译文字号 = 原文字号 * 此值
+    translation_color: str = ""              # 空=跟随主题文本色；否则用此 hex 色
 
 
 @dataclass
@@ -204,6 +235,7 @@ class Config:
     asr: AsrProfiles = field(default_factory=AsrProfiles)
     ui: UiConfig = field(default_factory=UiConfig)
     skin: SkinConfig = field(default_factory=SkinConfig)
+    translate: TranslationConfig = field(default_factory=TranslationConfig)
 
 
 def _build_asr_config(d: dict) -> AsrConfig:
@@ -239,6 +271,8 @@ def _build(d: dict[str, Any]) -> Config:
                        if k in UiConfig.__dataclass_fields__}),
         skin=SkinConfig(**{k: v for k, v in d.get("skin", {}).items()
                            if k in SkinConfig.__dataclass_fields__}),
+        translate=TranslationConfig(**{k: v for k, v in d.get("translate", {}).items()
+                                       if k in TranslationConfig.__dataclass_fields__}),
     )
 
 

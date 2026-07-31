@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from .config import load_config, DEFAULT_CONFIG_PATH, default_config_path
 from .asr import create_engine
 from .pipeline import SubtitlePipeline
+from .translate import TranslationWorker, TranslatorError
 from .ui import SubtitlePanel, TrayController, SettingsDialog, get_theme_manager
 from . import credentials, paths
 from . import logging_setup
@@ -225,6 +226,25 @@ class SubtitleApp:
         from .skin.runtime import SkinRuntime
         self.skin_runtime = SkinRuntime(self.panel)
 
+        # 翻译协调器：接 ASR 定稿句 → 后台翻译 → 译文写进 panel 下方独立行。
+        # 译文与原文各行出字、互不干扰（翻译后台线程池，不阻塞 ASR）。
+        # start/stop 与识别同生命周期（_on_started / _stop 里调）。
+        self._translator = TranslationWorker(
+            self.cfg, on_error=lambda msg: self.panel.set_status(msg)
+        )
+        self._translator.translation_done.connect(
+            lambda o, t, s: self.panel.emit_translation(o, t, s)
+        )
+        # 启动时按配置决定译文区是否显示（翻译关闭 = 单行原状，零回归）
+        self.panel.set_translation_enabled(self.cfg.translate.enabled)
+        # 同步译文样式镜像到 ui_cfg（panel 读 ui_cfg.translation_*）
+        self.cfg.ui.translation_font_scale = self.cfg.translate.translation_font_scale
+        self.cfg.ui.translation_color = self.cfg.translate.translation_color
+        self.panel.set_translation_style(
+            font_scale=self.cfg.translate.translation_font_scale,
+            color=self.cfg.translate.translation_color or None,
+        )
+
         # 托盘
         self.tray = TrayController()
         self.tray.toggle_visibility_requested.connect(self.panel.toggle_visibility)
@@ -300,6 +320,10 @@ class SubtitleApp:
             self._worker.text.connect(lambda t, f, s, spk: self.panel.emit_text(t, f, s, spk))
             # 皮肤触发器：对 source 透明（合并文本触发，不破坏现有皮肤配置，不需要 spk）
             self._worker.text.connect(lambda t, f, s, spk: self.skin_runtime.on_text(t, f))
+            # 翻译：仅定稿句（is_final=True）送翻译协调器（partial 不翻，避免频繁重译）。
+            # 翻译后台线程池异步执行，返回后独立推进译文区，与原文互不干扰。
+            if self.cfg.translate.enabled:
+                self._worker.text.connect(lambda t, f, s, spk: self._translator.feed(t, s) if f else None)
             self._worker.audio_level.connect(lambda r, p, s: self.skin_runtime.on_audio_level(r, p))
             self._thread.start()
         finally:
@@ -365,6 +389,16 @@ class SubtitleApp:
         self.tray.set_running(True)
         self.tray.notify("sub-title", "已开始实时识别")
         self.skin_runtime.on_recognition_start()
+        # 启动翻译器（与识别同生命周期）。翻译器构造失败（如 Azure 没 key）→ 状态栏
+        # 提示一次，不中断识别（用户仍能用原文字幕）。返回 False = 翻译未启用，跳过。
+        if self.cfg.translate.enabled:
+            try:
+                self._translator.start()
+            except TranslatorError as e:
+                self.panel.set_status(f"翻译未启用：{e}")
+            except Exception as e:
+                logger.exception("翻译器启动异常")
+                self.panel.set_status(f"翻译启动异常：{e}")
 
     def _on_failed(self, msg: str):
         self.panel.set_status(f"出错：{msg}")
@@ -376,6 +410,11 @@ class SubtitleApp:
         was_running = self._worker is not None
         if self._worker is not None:
             self._worker.stop()    # pipeline.stop：发哨兵 + join 推理线程（推理线程内 engine.stop）
+        # 停翻译器（关线程池，释放连接）。与 pipeline.stop 对称，避免后台线程残留。
+        try:
+            self._translator.stop()
+        except Exception as e:
+            logger.exception("翻译器停止异常")
         self._cleanup_thread()
         self.panel.set_split_sources(set())
         self.panel.set_status("已停止")
@@ -602,6 +641,12 @@ class SubtitleApp:
 
 def main():
     _setup_console_io()
+    # 预热重库：在单线程期（Qt 未起、worker 线程未建）完成 scipy/numpy 的延迟
+    # docstring 解析。这些库内部用 inspect.getsource + linecache + tokenize 解析文档，
+    # 而该链路非线程安全——若推迟到 worker 线程（engine.load → funasr/librosa → scipy）
+    # 首次触发，会与主线程 Qt 事件循环并发，linecache 竞态导致 Qt6Core.dll 内存访问违例
+    # 崩溃（0xc0000409）。启动早期单线程预热一次，让缓存就绪，规避运行期竞态。
+    _warmup_heavy_libs()
     app = SubtitleApp()
     code = app.run()
     # app.exec_() 正常返回（未被 aboutToQuit 的 os._exit 终止）时的兜底
@@ -609,6 +654,33 @@ def main():
         os._exit(code)
     except Exception:
         sys.exit(code)
+
+
+def _warmup_heavy_libs() -> None:
+    """单线程预热 scipy/numpy，让它们的延迟 docstring 解析（inspect.getsource 链路）
+    在无并发下完成一次。失败不致命——预热只是规避竞态，库本身在 worker 里仍会正常加载。
+    """
+    import inspect
+    try:
+        import scipy  # noqa: F401
+        # 触发一次会走到 _docscrape / inspect.getsource 的访问，让 linecache 缓存就绪
+        for _name in ("scipy",):
+            obj = sys.modules.get(_name)
+            if obj is not None and getattr(obj, "__file__", None):
+                # getsource 触发 linecache.updatecache（竞态源头），单线程跑一次即缓存
+                try:
+                    inspect.getsource(obj)
+                except Exception:
+                    pass
+        import numpy  # noqa: F401
+        obj = sys.modules.get("numpy")
+        if obj is not None and getattr(obj, "__file__", None):
+            try:
+                inspect.getsource(obj)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug("重库预热跳过（%s）— 不影响功能", e)
 
 
 def _setup_console_io() -> None:

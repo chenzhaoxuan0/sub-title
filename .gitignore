@@ -19,6 +19,9 @@ dist/
 .venv/
 .env
 
+# 打包产物（PyInstaller 输出的发行包，体积大且每次构建不同）
+sub-title-*.zip
+
 # 模型缓存（FunASR 首次运行下载到此处）
 .cache/
 

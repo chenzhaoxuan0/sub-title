@@ -31,6 +31,10 @@ KEY_ALIYUN_AK_ID = "aliyun_access_key_id"
 KEY_ALIYUN_AK_SECRET = "aliyun_access_key_secret"
 KEY_ALIYUN_APPKEY = "aliyun_appkey"
 
+# Azure Translator 凭证 key（翻译功能主力引擎）
+KEY_AZURE_TRANSLATE_KEY = "azure_translate_key"
+KEY_AZURE_TRANSLATE_REGION = "azure_translate_region"
+
 # 默认 fallback 文件名
 _FALLBACK_FILE = "credentials.json"
 
@@ -194,6 +198,27 @@ def set_aliyun(ak_id: str = "", ak_secret: str = "", appkey: str = "") -> dict[s
         KEY_ALIYUN_AK_ID: set(KEY_ALIYUN_AK_ID, ak_id),
         KEY_ALIYUN_AK_SECRET: set(KEY_ALIYUN_AK_SECRET, ak_secret),
         KEY_ALIYUN_APPKEY: set(KEY_ALIYUN_APPKEY, appkey),
+    }
+
+
+# ============================================================
+# Azure Translator 凭证便捷 API
+# ============================================================
+def get_azure_translate() -> dict[str, str]:
+    """一次性读 Azure 翻译凭证（key + region）。"""
+    return {
+        KEY_AZURE_TRANSLATE_KEY: get(KEY_AZURE_TRANSLATE_KEY) or "",
+        KEY_AZURE_TRANSLATE_REGION: get(KEY_AZURE_TRANSLATE_REGION) or "",
+    }
+
+
+def set_azure_translate(key: str = "", region: str = "") -> dict[str, bool]:
+    """一次性写 Azure 翻译凭证。空字符串 = 删除。
+
+    返回每项是否成功。"""
+    return {
+        KEY_AZURE_TRANSLATE_KEY: set(KEY_AZURE_TRANSLATE_KEY, key),
+        KEY_AZURE_TRANSLATE_REGION: set(KEY_AZURE_TRANSLATE_REGION, region),
     }
 
 

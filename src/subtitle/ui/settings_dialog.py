@@ -466,9 +466,35 @@ class EngineConfigCard(SettingCard):
         self.nano_wsl_status.setText("正在检测 WSL 服务状态…")
         self.nano_wsl_btn.setEnabled(False)
         self.nano_wsl_btn.setText("检测中…")
+        # 关键：创建新 worker 前先妥善结束旧 worker。否则旧 worker 引用被覆盖 → GC 回收，
+        # 但它的 run() 可能仍阻塞在 subprocess.run 等待 wsl.exe → QThread 被销毁时仍运行
+        # → Qt6Core.dll 0xc0000409 崩溃。wait(2000) 给 wsl.exe 足够返回时间，超时则 requestInterruption。
+        self._join_wsl_worker()
         self._wsl_worker = _WslStatusWorker()
         self._wsl_worker.finished_status.connect(self._on_nano_wsl_status)
         self._wsl_worker.start()
+
+    def _join_wsl_worker(self) -> None:
+        """安全结束当前的 WSL worker 线程：先 quit，再 wait（带超时），未退出则标记中断。
+
+        QThread.wait() 会阻塞主线程——但 worker 的 run() 在 subprocess.run 里等 wsl.exe
+        （通常 <2s 返回），wait(5000) 足够；最坏 wsl.exe 卡住时 wait 超时返回，
+        worker 线程仍在跑——此时不强行 delete，保留引用避免 GC 销毁导致的崩溃。
+        """
+        w = getattr(self, "_wsl_worker", None)
+        if w is None:
+            return
+        try:
+            if w.isRunning():
+                w.requestInterruption()
+                w.quit()
+                if not w.wait(5000):
+                    # 仍在跑（wsl.exe 卡住）：保留引用，不置 None，避免 GC 销毁
+                    print("[settings] WSL worker 5s 未退出，保留引用防崩溃")
+                    return
+        except Exception:
+            pass
+        self._wsl_worker = None
 
     def _on_nano_wsl_status(self, result: object) -> None:
         """状态探测完成：根据 installed/running 切按钮文案与可点的动作。"""
@@ -532,6 +558,8 @@ class EngineConfigCard(SettingCard):
             worker.progress.connect(
                 lambda msg: self.nano_wsl_status.setText(f"启动中：{msg}"))
             worker.finished_ok.connect(self._on_nano_wsl_start_done)
+        # 覆盖前先妥善结束旧 worker（可能是探测 worker 仍在跑），防 GC 销毁崩溃
+        self._join_wsl_worker()
         self._wsl_worker = worker
         worker.start()
 
@@ -747,6 +775,23 @@ class _WslStatusWorker(QThread):
         self.finished_status.emit(result)
 
 
+class _TranslationTestWorker(QThread):
+    """后台跑翻译连通性测试（网络请求 1-2s，避免卡 UI）。"""
+
+    finished_pair = Signal(bool, str)   # (ok, message)
+
+    def __init__(self, fn):
+        super().__init__()
+        self._fn = fn
+
+    def run(self):
+        try:
+            ok, msg = self._fn()
+        except Exception as e:
+            ok, msg = False, f"测试异常：{e}"
+        self.finished_pair.emit(ok, msg)
+
+
 class SettingsDialog(QDialog):
     """设置对话框（Fluent 风格）。"""
 
@@ -837,6 +882,7 @@ class SettingsDialog(QDialog):
             ("说话人", self._build_speaker_tab()),
             ("外观", self._build_appearance_tab()),
             ("行为", self._build_behavior_tab()),
+            ("翻译", self._build_translation_tab()),
             ("皮肤", self._build_skin_tab()),
             ("文稿", self._build_transcript_tab()),
         ]
@@ -927,11 +973,19 @@ class SettingsDialog(QDialog):
             QTimer.singleShot(0, self._kickoff_nano_wsl_probe)
 
     def _kickoff_nano_wsl_probe(self) -> None:
-        """对话框显示后，对流式模式的引擎卡片触发一次 WSL 状态探测。"""
+        """对话框显示后，对**当前引擎是 funasr_nano 且处于流式模式**的卡片触发一次 WSL 状态探测。
+
+        关键：必须同时判断 engine_combo 是 funasr_nano。否则用户曾切过 nano 流式又切回
+        sensevoice 等本地引擎时，funasr_nano_mode 字段残留 'streaming'，combo 仍显示流式，
+        会给纯 Windows 引擎白跑一次 WSL 探测（spawn wsl.exe）——既浪费又可能触发 QThread
+        生命周期问题。WSL 只服务于 funasr_nano 流式这一个场景。
+        """
         for card in (self.system_engine_card, self.mic_engine_card):
             try:
+                engine_is_nano = card.engine_combo.currentData() == "funasr_nano"
                 combo = getattr(card, "nano_mode_combo", None)
-                if combo is not None and combo.currentData() == "streaming":
+                if (engine_is_nano and combo is not None
+                        and combo.currentData() == "streaming"):
                     if not getattr(card, "_wsl_busy", False):
                         card._refresh_nano_wsl_status()
             except Exception as e:
@@ -944,6 +998,14 @@ class SettingsDialog(QDialog):
         finished 信号，导致 app 的 _on_settings_finished 不执行（配置不保存、
         单例引用不清空，下次「全局设置」打不开）。这里显式 reject() 保证一致。
         """
+        # 关键：关闭前等各引擎卡片的 WSL worker 退出。否则对话框关闭后 worker 仍阻塞
+        # 在 subprocess.run 等 wsl.exe，引用随对话框消失 → QThread 被销毁时仍运行 →
+        # Qt6Core.dll 0xc0000409 崩溃。WSL worker 属于 EngineConfigCard（每路一个）。
+        for card in (self.system_engine_card, self.mic_engine_card):
+            try:
+                card._join_wsl_worker()
+            except Exception:
+                pass
         self.reject()
         event.ignore()   # 真正的关闭由 reject → finished → app 链路完成
 
@@ -1471,7 +1533,225 @@ class SettingsDialog(QDialog):
         v.addStretch(1)
         return self._wrap_scroll(tab)
 
-    # ---------- 标签页4：皮肤 ----------
+    # ---------- 标签页：翻译 ----------
+    def _build_translation_tab(self) -> QWidget:
+        """翻译功能设置：总开关 + 引擎选择 + 语言对 + 凭证/服务地址 + 译文样式。
+
+        译文显示在字幕窗口底部独立一行，与原文各行出字、互不干扰。
+        关闭总开关 = 单行原状，零行为回归。
+        """
+        tab = QWidget()
+        v = QVBoxLayout(tab)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(8)
+
+        # 总开关 + 引擎
+        g_main = SettingCardGroup("翻译")
+        self.trans_enable_check = ToggleSwitch()
+        g_main.add_card(_row(
+            "启用翻译",
+            "开启后字幕窗口底部双行显示：一行原文、一行译文，分别出字互不干扰。"
+            "关闭则恢复单行原文。",
+            self.trans_enable_check,
+        ))
+        self.trans_engine_combo = QComboBox()
+        self.trans_engine_combo.addItem("微软 Azure（推荐，官方免费层）", "azure")
+        self.trans_engine_combo.addItem("谷歌 Google（免 key，易限流）", "google")
+        self.trans_engine_combo.addItem("本地 LibreTranslate（离线）", "libretranslate")
+        self.trans_engine_combo.addItem("本地 NLLB-200（离线，质量最高）", "nllb")
+        self.trans_engine_combo.currentIndexChanged.connect(self._on_trans_engine_changed)
+        g_main.add_card(_row("翻译引擎", "选择翻译服务来源", self.trans_engine_combo))
+        v.addWidget(g_main)
+
+        # 语言对
+        g_lang = SettingCardGroup("语言")
+        self.trans_src_combo = QComboBox()
+        self.trans_tgt_combo = QComboBox()
+        # 常用语种（auto 仅源语言用）
+        common = [
+            ("自动检测", "auto"), ("中文", "zh-Hans"), ("英语", "en"),
+            ("日语", "ja"), ("韩语", "ko"), ("法语", "fr"),
+            ("德语", "de"), ("西班牙语", "es"), ("俄语", "ru"), ("阿拉伯语", "ar"),
+        ]
+        for label, code in common:
+            self.trans_src_combo.addItem(label, code)
+            # 目标语言去掉"自动检测"
+            if code != "auto":
+                self.trans_tgt_combo.addItem(label, code)
+        g_lang.add_card(_row("源语言", "原文语种（自动检测=让翻译服务判断）", self.trans_src_combo))
+        g_lang.add_card(_row("目标语言", "译文语种", self.trans_tgt_combo))
+        v.addWidget(g_lang)
+
+        # 引擎参数（按当前引擎显示对应卡片：Azure 凭证 / 本地服务地址）
+        self.trans_param_stack = QStackedWidget()
+        # 索引 0：Azure 凭证
+        self.trans_param_stack.addWidget(self._build_trans_azure_card())
+        # 索引 1：LibreTranslate / NLLB 本地服务地址
+        self.trans_param_stack.addWidget(self._build_trans_local_card())
+        # Google 无需额外配置（免 key），用一个占位卡片
+        g_google = SettingCardGroup("谷歌翻译")
+        google_hint = QLabel(
+            "谷歌翻译走免费非官方端点，无需配置。\n"
+            "注意：高频调用易触发 Google 限流（译文会重试），稳定性低于 Azure，"
+            "建议作为不想配 key 时的备选。"
+        )
+        google_hint.setStyleSheet("color: #888; font-size: 11px;")
+        google_hint.setWordWrap(True)
+        g_google.add_card(_row("说明", "", google_hint, vertical=True))
+        self.trans_param_stack.addWidget(g_google)
+        v.addWidget(self.trans_param_stack)
+
+        # 译文样式
+        g_style = SettingCardGroup("译文样式")
+        self.trans_scale_spin = QDoubleSpinBox()
+        self.trans_scale_spin.setRange(0.5, 1.0)
+        self.trans_scale_spin.setSingleStep(0.05)
+        self.trans_scale_spin.setSuffix(" 倍")
+        g_style.add_card(_row(
+            "译文字号", "译文字号 = 原文字号 × 此值（小于 1 让译文更小、突出原文）",
+            self.trans_scale_spin,
+        ))
+        self.trans_color_btn = ColorButton()
+        g_style.add_card(_row(
+            "译文颜色", "默认跟随主题文本色；点击自定义颜色", self.trans_color_btn,
+        ))
+        v.addWidget(g_style)
+
+        v.addStretch(1)
+        return self._wrap_scroll(tab)
+
+    def _build_trans_azure_card(self) -> QWidget:
+        """Azure 凭证输入卡片（照阿里云：从系统保险箱读、apply 时写）。"""
+        g = SettingCardGroup("Azure 凭证")
+        cred_hint = QLabel(
+            f"Azure Translator key 与 region 存于系统保险箱（{credentials.storage_location()}），"
+            "不进 config.yaml。\n"
+            "免费层 F0：每小时 200 万字符，无需付费。"
+            "申请：Azure 门户 → 创建「翻译器」资源 → 取 Key1 + 区域。"
+        )
+        cred_hint.setStyleSheet("color: #888; font-size: 11px;")
+        cred_hint.setWordWrap(True)
+        g.add_card(_row("说明", "", cred_hint, vertical=True))
+        self.trans_azure_key_edit = QLineEdit()
+        self.trans_azure_key_edit.setEchoMode(QLineEdit.Password)
+        self.trans_azure_key_edit.setPlaceholderText("Azure Translator Key1")
+        g.add_card(_row("Key", "Ocp-Apim-Subscription-Key", self.trans_azure_key_edit))
+        self.trans_azure_region_edit = QLineEdit()
+        self.trans_azure_region_edit.setPlaceholderText("如 eastus / southeastasia")
+        g.add_card(_row("Region", "Ocp-Apim-Subscription-Region", self.trans_azure_region_edit))
+        # 测试连接按钮
+        test_row = QWidget()
+        tr = QHBoxLayout(test_row)
+        tr.setContentsMargins(0, 0, 0, 0)
+        self.trans_test_btn = QPushButton("🔍 测试连接")
+        self.trans_test_btn.clicked.connect(self._on_trans_test)
+        self.trans_test_status = QLabel("")
+        self.trans_test_status.setStyleSheet("color: #888; font-size: 11px;")
+        tr.addWidget(self.trans_test_btn)
+        tr.addWidget(self.trans_test_status, 1)
+        g.add_card(_row("测试", "用当前配置探测翻译服务连通性", test_row))
+        return g
+
+    def _build_trans_local_card(self) -> QWidget:
+        """本地服务（LibreTranslate / NLLB）地址卡片。"""
+        g = SettingCardGroup("本地服务地址")
+        local_hint = QLabel(
+            "本地翻译服务需自行在 WSL/终端启动，桌面程序通过 localhost 直连（与 nano 流式同模式）。\n"
+            "• LibreTranslate：docker run -p 5000:5000 libretranslate/libretranslate --load-only en,zh\n"
+            "• NLLB-200：pip install git+https://github.com/thammegowda/nllb-serve 后运行 nllb-serve"
+        )
+        local_hint.setStyleSheet("color: #888; font-size: 11px;")
+        local_hint.setWordWrap(True)
+        g.add_card(_row("说明", "", local_hint, vertical=True))
+        self.trans_lt_host_edit = QLineEdit("localhost")
+        self.trans_lt_port_spin = QSpinBox()
+        self.trans_lt_port_spin.setRange(1, 65535)
+        self.trans_lt_port_spin.setValue(5000)
+        lt_row = QWidget()
+        ltr = QHBoxLayout(lt_row)
+        ltr.setContentsMargins(0, 0, 0, 0)
+        ltr.addWidget(self.trans_lt_host_edit, 3)
+        ltr.addWidget(self.trans_lt_port_spin, 1)
+        g.add_card(_row("LibreTranslate", "host : port", lt_row))
+        self.trans_nllb_host_edit = QLineEdit("localhost")
+        self.trans_nllb_port_spin = QSpinBox()
+        self.trans_nllb_port_spin.setRange(1, 65535)
+        self.trans_nllb_port_spin.setValue(6060)
+        nllb_row = QWidget()
+        nr = QHBoxLayout(nllb_row)
+        nr.setContentsMargins(0, 0, 0, 0)
+        nr.addWidget(self.trans_nllb_host_edit, 3)
+        nr.addWidget(self.trans_nllb_port_spin, 1)
+        g.add_card(_row("NLLB-200", "host : port", nllb_row))
+        return g
+
+    def _on_trans_engine_changed(self) -> None:
+        """引擎切换：显示对应的参数卡片（Azure 凭证 / 本地服务 / Google 说明）。"""
+        eng = self.trans_engine_combo.currentData()
+        if eng == "azure":
+            self.trans_param_stack.setCurrentIndex(0)
+        elif eng in ("libretranslate", "nllb"):
+            self.trans_param_stack.setCurrentIndex(1)
+        else:   # google
+            self.trans_param_stack.setCurrentIndex(2)
+
+    def _on_trans_test(self) -> None:
+        """测试连接：临时构造翻译器跑一次 translate。后台线程避免卡 UI。"""
+        from ..translate import create_translator, TranslatorError
+        # 先把当前对话框里的配置临时写进一个副本 cfg，用副本造翻译器（不污染主 cfg）
+        import copy
+        cfg = copy.copy(self.cfg)
+        cfg.translate = copy.deepcopy(self.cfg.translate)
+        self._apply_translation_to_cfg(cfg.translate)
+        # Azure：测试用对话框里刚填的 key（还没 apply 到 keyring），临时塞进翻译器
+        if cfg.translate.engine == "azure":
+            credentials.set_azure_translate(
+                key=self.trans_azure_key_edit.text().strip(),
+                region=self.trans_azure_region_edit.text().strip(),
+            )
+
+        self.trans_test_btn.setEnabled(False)
+        self.trans_test_status.setText("测试中……")
+
+        def _run():
+            try:
+                tr = create_translator(cfg)
+                if tr is None:
+                    return False, "翻译未启用"
+                ok = tr.test()
+                return ok, "连接成功" if ok else "连接失败（详见状态栏）"
+            except TranslatorError as e:
+                return False, str(e)
+            except Exception as e:
+                return False, f"异常：{e}"
+
+        from PySide6.QtCore import QThread
+        worker = _TranslationTestWorker(_run)
+        worker.finished_pair.connect(self._on_trans_test_done)
+        self._trans_test_worker = worker   # 持有引用防 GC
+        worker.start()
+
+    def _on_trans_test_done(self, ok: bool, msg: str):
+        self.trans_test_btn.setEnabled(True)
+        color = "#2e8b57" if ok else "#d94c4c"
+        self.trans_test_status.setText(msg)
+        self.trans_test_status.setStyleSheet(f"color: {color}; font-size: 11px;")
+
+    def _apply_translation_to_cfg(self, tcfg) -> None:
+        """把对话框控件值写进一个 TranslationConfig 对象（供 apply / test 共用）。"""
+        tcfg.enabled = self.trans_enable_check.isChecked()
+        tcfg.engine = self.trans_engine_combo.currentData()
+        tcfg.source_lang = self.trans_src_combo.currentData()
+        tcfg.target_lang = self.trans_tgt_combo.currentData()
+        tcfg.translation_font_scale = self.trans_scale_spin.value()
+        color = self.trans_color_btn.get_color()
+        tcfg.translation_color = color if color else ""
+        tcfg.libretranslate_host = self.trans_lt_host_edit.text().strip() or "localhost"
+        tcfg.libretranslate_port = self.trans_lt_port_spin.value()
+        tcfg.nllb_host = self.trans_nllb_host_edit.text().strip() or "localhost"
+        tcfg.nllb_port = self.trans_nllb_port_spin.value()
+
+    # ---------- 标签页：皮肤 ----------
     def _build_skin_tab(self) -> QWidget:
         tab = QWidget()
         v = QVBoxLayout(tab)
@@ -1560,6 +1840,28 @@ class SettingsDialog(QDialog):
         self.aliyun_akid_edit.setText(credentials.get(credentials.KEY_ALIYUN_AK_ID) or "")
         self.aliyun_aksecret_edit.setText(credentials.get(credentials.KEY_ALIYUN_AK_SECRET) or "")
         self.aliyun_appkey_edit.setText(credentials.get(credentials.KEY_ALIYUN_APPKEY) or "")
+        # 翻译
+        tr = self.cfg.translate
+        self.trans_enable_check.setChecked(bool(tr.enabled))
+        idx = self.trans_engine_combo.findData(tr.engine)
+        self.trans_engine_combo.setCurrentIndex(max(0, idx))
+        sidx = self.trans_src_combo.findData(tr.source_lang)
+        self.trans_src_combo.setCurrentIndex(max(0, sidx))
+        tidx = self.trans_tgt_combo.findData(tr.target_lang)
+        self.trans_tgt_combo.setCurrentIndex(max(0, tidx))
+        # Azure 凭证（从系统保险箱读）
+        azure = credentials.get_azure_translate()
+        self.trans_azure_key_edit.setText(azure.get(credentials.KEY_AZURE_TRANSLATE_KEY, "") or "")
+        self.trans_azure_region_edit.setText(azure.get(credentials.KEY_AZURE_TRANSLATE_REGION, "") or "")
+        # 本地服务地址
+        self.trans_lt_host_edit.setText(tr.libretranslate_host or "localhost")
+        self.trans_lt_port_spin.setValue(int(tr.libretranslate_port or 5000))
+        self.trans_nllb_host_edit.setText(tr.nllb_host or "localhost")
+        self.trans_nllb_port_spin.setValue(int(tr.nllb_port or 6060))
+        # 译文样式
+        self.trans_scale_spin.setValue(float(tr.translation_font_scale or 0.85))
+        self.trans_color_btn.set_color(tr.translation_color or "#cccccc")
+        self._on_trans_engine_changed()   # 按当前引擎刷新参数卡片显隐
 
         # 外观
         current_theme = self.panel.get_theme()
@@ -1981,6 +2283,21 @@ class SettingsDialog(QDialog):
             ak_id=self.aliyun_akid_edit.text().strip(),
             ak_secret=self.aliyun_aksecret_edit.text().strip(),
             appkey=self.aliyun_appkey_edit.text().strip(),
+        )
+
+        # 翻译：写 cfg.translate + Azure 凭证存保险箱 + 同步译文区显隐/样式
+        self._apply_translation_to_cfg(self.cfg.translate)
+        credentials.set_azure_translate(
+            key=self.trans_azure_key_edit.text().strip(),
+            region=self.trans_azure_region_edit.text().strip(),
+        )
+        # 同步译文样式镜像到 ui_cfg（panel 读 ui_cfg.translation_*）
+        ui.translation_font_scale = self.cfg.translate.translation_font_scale
+        ui.translation_color = self.cfg.translate.translation_color
+        p.set_translation_enabled(self.cfg.translate.enabled)
+        p.set_translation_style(
+            font_scale=self.cfg.translate.translation_font_scale,
+            color=self.cfg.translate.translation_color or None,
         )
 
         # 外观
