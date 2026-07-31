@@ -241,6 +241,8 @@ class SubtitlePanel(QWidget):
     """沉浸式无边框字幕窗口 v4。"""
 
     _text_appended = Signal(str, bool, str, object)  # (text, is_final, source, spk_id)
+    # 译文到达：(原文, 译文, source)。翻译后台线程完成后 emit，主线程槽写进 view_trans
+    _translation_appended = Signal(str, str, str)
     hide_requested = Signal()
     quit_requested = Signal()
     theme_changed = Signal(str)  # 主题切换信号
@@ -261,6 +263,7 @@ class SubtitlePanel(QWidget):
 
         self._theme_mgr = get_theme_manager()
         self._text_appended.connect(self._on_text_appended)
+        self._translation_appended.connect(self._on_translation_appended)
         self._drag_offset: QPoint | None = None
         self._font_size = ui_cfg.font_size or 22
         self._skin_runtime = None
@@ -315,6 +318,11 @@ class SubtitlePanel(QWidget):
         self._finalized_count: dict[tuple[str, object], int] = {}
         self._cur_text: dict[tuple[str, object], str] = {}
 
+        # 译文流专属状态：与原文流完全独立（不共享 _interim / _regions）。
+        # 译文是"定稿后才来"的完整句子，走简单追加 + 句号分行模型，无需 interim 覆盖。
+        self._trans_line_breaker = LineBreaker(enabled=self.ui_cfg.line_break_enabled)
+        self._trans_deferred_break = False
+
         self._init_window_flags()
         self._init_ui()
         self._apply_theme()
@@ -352,6 +360,17 @@ class SubtitlePanel(QWidget):
         font_family = self.ui_cfg.font_family or geo.font_family
         self.view.setFont(QFont(font_family, self._font_size))
         self.view.setPlaceholderText("点击 ▶ 开始，播放任意视频/音频，字幕会实时出现……")
+
+        # 译文 view：开启翻译时显示在原文下方，独立 interim + 独立行管理，
+        # 与原文各行出字、互不干扰。默认隐藏（翻译关闭 = 单行原状）。
+        self.view_trans = _SubtitleView(self.container)
+        self.view_trans.setObjectName("subtitle_trans")
+        trans_scale = float(getattr(self.ui_cfg, "translation_font_scale", 0.85) or 0.85)
+        self._trans_font_size = max(4, int(round(self._font_size * trans_scale)))
+        self.view_trans.setFont(QFont(font_family, self._trans_font_size))
+        self.view_trans.hide()   # 翻译未启用时隐藏，不占布局空间
+        # 运行期标记：译文区当前是否可见（不落盘，纯实例属性）
+        self._translation_visible = False
 
         # 字幕上层贴图：耳朵、尾巴和前景装饰。
         self.overlay_layer = OverlayLayer("above_text", self.container)
@@ -493,10 +512,12 @@ class SubtitlePanel(QWidget):
         self.grip.setObjectName("grip")
         self.grip.setFixedSize(16, 16)
 
-        # 组装 container —— 只有 view，撑满整个高度
-        container_layout.addWidget(self.view, 1)
+        # 组装 container —— 原文 view 撑满；译文 view（隐藏时不占位）在下方
+        container_layout.addWidget(self.view, 3)
+        container_layout.addWidget(self.view_trans, 2)
         self.underlay_layer.lower()
         self.view.raise_()
+        self.view_trans.raise_()
         self.overlay_layer.raise_()
         self.status_label.raise_()
         self.grip.raise_()
@@ -711,6 +732,16 @@ class SubtitlePanel(QWidget):
                 padding: {pad_t}px {pad_r}px {pad_b}px {pad_l}px;
             }}
         """)
+        # 译文区 padding：左右与原文对齐，上下减半（两行更紧凑）；颜色按 translation_color
+        trans_color = getattr(self.ui_cfg, "translation_color", "") or colors.subtitle_text
+        self.view_trans.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: transparent;
+                color: {trans_color};
+                border: none;
+                padding: {max(2, pad_t // 2)}px {pad_r}px {max(2, pad_b // 2)}px {pad_l}px;
+            }}
+        """)
 
     @staticmethod
     def _hex_to_rgb(hex_color: str):
@@ -743,6 +774,10 @@ class SubtitlePanel(QWidget):
     def _apply_font(self):
         try:
             self.view.setFont(QFont(self.ui_cfg.font_family, self._font_size))
+            # 译文字号联动（按 translation_font_scale 缩放）
+            scale = float(getattr(self.ui_cfg, "translation_font_scale", 0.85) or 0.85)
+            self._trans_font_size = max(4, int(round(self._font_size * scale)))
+            self.view_trans.setFont(QFont(self.ui_cfg.font_family, self._trans_font_size))
         except Exception as e:
             print(f"[ui] 应用字体失败: {e}")
 
@@ -988,6 +1023,76 @@ class SubtitlePanel(QWidget):
         绝不能在这里直接操作 QTimer/QWidget（它们属于主线程），否则 PySide6 报
         'startTimer from another thread'。"""
         self._text_appended.emit(text, is_final, source, spk_id)
+
+    def emit_translation(self, orig: str, trans: str, source: str = "system"):
+        """跨线程安全：译文到达时调（翻译后台线程）。orig 是原文（用于按 source 着色/对齐），
+        trans 是译文。主线程槽 _on_translation_appended 写进 view_trans。"""
+        self._translation_appended.emit(orig, trans, source)
+
+    def _on_translation_appended(self, orig: str, trans: str, source: str = "system"):
+        """主线程槽：把译文写进 view_trans（与原文流独立，互不干扰）。
+
+        译文是"定稿后才来"的完整句子，走简单追加 + 句号分行模型，不需要 interim 覆盖
+        （翻译不会逐字纠错）。每次到一条译文追加一行，与原文滚动联动。
+        """
+        if not trans or not trans.strip():
+            return
+        # 按 line_breaker 给译文按句末标点分行（与原文同规则，独立实例）
+        processed = self._trans_line_breaker.feed(trans, is_final=True)
+        ends_with_break = processed.endswith("\n")
+        if ends_with_break:
+            processed = processed[:-1]
+
+        bar = self.view_trans.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - bar.singleStep()
+        saved_pos = bar.value()
+        doc = self.view_trans.document()
+        cursor = QTextCursor(doc)
+        cursor.beginEditBlock()
+        cursor.movePosition(QTextCursor.End)
+        if self._trans_deferred_break:
+            cursor.insertText("\n")
+            self._trans_deferred_break = False
+        color = self._translation_color()
+        prefix = self._speaker_prefix(source, None)  # 译文不带说话人前缀（保持简洁）
+        for i, seg in enumerate(processed.split("\n")):
+            if i > 0:
+                cursor.insertText("\n")
+            if seg:
+                safe = html.escape(seg)
+                this_prefix = prefix if i == 0 else ""
+                cursor.insertHtml(f'<span style="color:{color};">{this_prefix}{safe}</span>')
+        # 译文区 trim（与原文同阈值，独立 doc）
+        self._trim_trans_if_needed(doc, cursor)
+        cursor.endEditBlock()
+
+        self._trans_deferred_break = ends_with_break
+        # 滚动锚定（与原文一致策略）
+        if getattr(self.ui_cfg, "lock_scroll_to_bottom", False) or at_bottom:
+            bar.setValue(bar.maximum())
+        else:
+            bar.setValue(saved_pos)
+
+    def _translation_color(self) -> str:
+        """译文颜色：translation_color 优先，否则跟随主题文本色（略浅让原文更突出）。"""
+        custom = getattr(self.ui_cfg, "translation_color", "") or ""
+        if custom:
+            return custom
+        theme = self._theme_mgr.current if self._theme_mgr else None
+        return theme.colors.subtitle_text if theme else "#cccccc"
+
+    def _trim_trans_if_needed(self, doc, cursor) -> None:
+        """译文区字符上限裁剪（独立于原文 _trim_if_needed）。"""
+        max_chars = getattr(self.ui_cfg, "max_chars", 20000)
+        total = doc.characterCount()
+        if total <= max_chars:
+            return
+        keep = int(max_chars * 0.9)
+        D = total - keep
+        c = QTextCursor(doc)
+        c.movePosition(QTextCursor.Start)
+        c.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, D)
+        c.removeSelectedText()
 
     def _on_text_appended(self, text: str, is_final: bool, source: str = "system", spk_id=None):
         """主线程槽：累积到 buffer + 节流 flush（这里操作 QTimer 安全）。"""
@@ -1417,6 +1522,9 @@ class SubtitlePanel(QWidget):
         self._hist_sentences.clear()
         self._finalized_count.clear()
         self._cur_text.clear()
+        # 同步清译文区
+        self.view_trans.clear()
+        self._trans_deferred_break = False
 
     def closeEvent(self, e):
         if getattr(self, "_force_quit", False):
@@ -1686,6 +1794,9 @@ class SubtitlePanel(QWidget):
         self._hist_sentences.clear()
         self._finalized_count.clear()
         self._cur_text.clear()
+        # 同步清译文区
+        self.view_trans.clear()
+        self._trans_deferred_break = False
 
     def set_toolbar_hide_delay(self, ms: int):
         self.ui_cfg.toolbar_hide_delay_ms = int(ms)
@@ -1701,6 +1812,27 @@ class SubtitlePanel(QWidget):
 
     def get_line_break(self) -> bool:
         return self.ui_cfg.line_break_enabled
+
+    # ---------- 翻译 ----------
+    def set_translation_enabled(self, enabled: bool) -> None:
+        """开关译文区显示。enabled=True 显示 view_trans（双行），False 隐藏（单行原状）。
+        不清空已有译文——重新开启时历史译文仍在。"""
+        self._translation_visible = bool(enabled)
+        self.view_trans.setVisible(bool(enabled))
+
+    def set_translation_style(self, font_scale: float | None = None,
+                              color: str | None = None) -> None:
+        """更新译文字号缩放 / 颜色（设置对话框实时预览用）。"""
+        if font_scale is not None:
+            self.ui_cfg.translation_font_scale = float(font_scale)
+            self._apply_font()   # _apply_font 内会按 scale 重算 _trans_font_size
+        if color is not None:
+            self.ui_cfg.translation_color = color
+            self._apply_theme()  # 重套 QSS 让译文颜色生效
+
+    def set_translation_line_break(self, enabled: bool) -> None:
+        """译文是否按句末标点分行（与原文 line_break 独立开关，默认跟随）。"""
+        self._trans_line_breaker.set_enabled(bool(enabled))
 
     def set_close_action(self, action: str):
         self.ui_cfg.close_action = action
