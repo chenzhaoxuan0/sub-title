@@ -63,6 +63,16 @@ hiddenimports += [
     "subtitle.asr.qwen3_asr_engine",
     "subtitle.asr.faster_whisper_engine",
     "subtitle.asr.aliyun_engine",
+    # ---- 翻译引擎：factory 按 engine_type 延迟 import，静态分析会漏（同 ASR 模式）----
+    # 纯 API 打包也要翻译（Azure/Google 云端翻译不依赖 torch，纯标准库 urllib）。
+    "subtitle.translate.base",
+    "subtitle.translate._http",
+    "subtitle.translate.factory",
+    "subtitle.translate.worker",
+    "subtitle.translate.azure_engine",
+    "subtitle.translate.google_engine",
+    "subtitle.translate.libretranslate_engine",
+    "subtitle.translate.nllb_engine",
 ]
 # ---- websockets：nano 流式 Windows 侧 WebSocket 客户端（load() 里延迟 import，
 # PyInstaller 静态分析会漏）。纯 API 模式也要它——nano 流式靠它连 WSL 里的服务。 ----
